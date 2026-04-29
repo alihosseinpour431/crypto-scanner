@@ -6,9 +6,9 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 # ================= CONFIG =================
 # ⚠️ توکن‌ها را از Environment Variable می‌خوانیم (برای امنیت)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-GITHUB_USERNAME = os.getenv("GITHUB_USERNAME", "alihosseinpour431")
+GITHUB_USERNAME = os.getenv("GH_USERNAME", "alihosseinpour431")
 GITHUB_REPO = os.getenv("GITHUB_REPO", "crypyo-scanner")
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")  # ← این توکن را بعداً در تنظیمات سرور وارد می‌کنی
+GITHUB_TOKEN = os.getenv("MY_GITHUB_TOKEN")  # ← این توکن را بعداً در تنظیمات سرور وارد می‌کنی
 
 # ================= GITHUB API =================
 def trigger_github_action():
