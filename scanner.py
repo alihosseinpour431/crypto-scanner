@@ -1,7 +1,7 @@
 # scanner.py
-# ⚠️ این کد دقیقاً همون کد گوگل کولب شماست، فقط با ۲ تغییر برای سازگاری با GitHub Actions
+# ✅ نسخه نهایی بهینه‌شده برای GitHub Actions
 
-import os  # ← این خط اضافه شده
+import os
 import time
 import requests
 import ccxt
@@ -18,33 +18,38 @@ EXCHANGE_ID = 'xt'
 SCAN_SPOT = True
 SCAN_FUTURES = True
 
-# تنظیمات تایم‌فریم‌ها
 DAILY_TIMEFRAME = '1d'
 DAILY_LIMIT = 230
 HOURLY_TIMEFRAME = '1h'
 HOURLY_LIMIT = 300
 MIN_REQUIRED_BARS = 210
-
-# بازه‌های محاسبه Alpha
 ALPHA_SHORT = 3
 ALPHA_LONG = 10
 
-# ================= تغییر ۱: خواندن توکن از Environment Variable =================
-# به جای هاردکد کردن، از گیت‌هاب سکرت می‌خونیم
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")  
+# ================= ENV & SECURITY FIXES =================
+# 1. اعتبارسنجی توکن
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+if not TELEGRAM_BOT_TOKEN:
+    raise ValueError("❌ TELEGRAM_BOT_TOKEN is not set in environment variables!")
 
-# ================= تغییر ۲: خواندن چت‌آیدی‌ها به صورت لیست =================
-# گیت‌هاب سکرت رو به صورت رشته می‌فرسته، اینجا تبدیل به لیست می‌کنیم
-TELEGRAM_CHAT_IDS = os.getenv("TELEGRAM_CHAT_ID", "487817626").split(",")
+# 2. پارس کردن امن Chat IDs (حذف آی‌دی‌های خالی)
+TELEGRAM_CHAT_IDS = [cid.strip() for cid in os.getenv("TELEGRAM_CHAT_ID", "487817626").split(",") if cid.strip()]
+
+# 3. کنترل لاگ‌ها از طریق متغیر محیطی
+DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
 
 COINGECKO_API = "https://api.coingecko.com/api/v3"
-DEBUG_MODE = True
 
-exchange = getattr(ccxt, EXCHANGE_ID)({
-    'enableRateLimit': True,
-    'timeout': 30000
-})
-exchange_markets = exchange.load_markets()
+# ================= EXCHANGE INIT WITH ERROR HANDLING =================
+try:
+    exchange = getattr(ccxt, EXCHANGE_ID)({
+        'enableRateLimit': True,
+        'timeout': 30000
+    })
+    exchange_markets = exchange.load_markets()
+except Exception as e:
+    print(f"❌ Critical Error initializing exchange: {e}")
+    exit(1)
 
 # ================= CACHE =================
 market_cap_cache = {}
@@ -52,10 +57,9 @@ symbol_type_cache = {}
 
 # ================= TELEGRAM =================
 def send_telegram_message(text, chat_id=None):
-    """ارسال پیام به تلگرام با فرمت HTML — اگر chat_id داده نشود، به همه ارسال می‌کند"""
     targets = [chat_id] if chat_id else TELEGRAM_CHAT_IDS
     for cid in targets:
-        cid = cid.strip()  # حذف فاصله‌های اضافی
+        cid = cid.strip()
         if not cid: continue
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         payload = {
@@ -76,7 +80,7 @@ def send_telegram_message(text, chat_id=None):
 def load_market_caps():
     if market_cap_cache:
         return
-    print("📥 در حال دریافت Market Cap از CoinGecko ...")
+    print("📥 Loading Market Cap from CoinGecko ...")
     session = requests.Session()
     for page in range(1, 21):
         try:
@@ -98,7 +102,7 @@ def load_market_caps():
             time.sleep(0.15)
         except Exception as e:
             if DEBUG_MODE:
-                print(f"⚠️ خطا در load_market_caps page={page}: {e}")
+                print(f"⚠️ Error in load_market_caps page={page}: {e}")
             break
     print(f"✅ Market Cap loaded: {len(market_cap_cache)} symbols")
 
@@ -107,7 +111,6 @@ def get_market_cap(symbol):
     return market_cap_cache.get(base_symbol)
 
 def format_market_cap(value):
-    """فرمت‌بندی حرفه‌ای مارکت‌کپ با ایموجی و بولد"""
     if value is None or (isinstance(value, float) and np.isnan(value)):
         return "🔸 N/A"
     try:
@@ -153,7 +156,9 @@ def fetch_ohlcv(symbol, timeframe, limit):
         df = pd.DataFrame(data, columns=['ts', 'o', 'h', 'l', 'c', 'v'])
         df['ts'] = pd.to_datetime(df['ts'], unit='ms', utc=True)
         return df
-    except:
+    except Exception as e:
+        if DEBUG_MODE:
+            print(f"⚠️ Fetch error {symbol}: {e}")
         return None
 
 # ================= INDICATORS =================
@@ -162,14 +167,17 @@ def calculate(df, short_win=ALPHA_SHORT, long_win=ALPHA_LONG):
     df['ema30'] = df['c'].ewm(span=30, adjust=False).mean()
     df['ema50'] = df['c'].ewm(span=50, adjust=False).mean()
     df['ema200'] = df['c'].ewm(span=200, adjust=False).mean()
+    
     delta = df['c'].diff()
     gain = delta.where(delta > 0, 0).rolling(30).mean()
     loss = -delta.where(delta < 0, 0).rolling(30).mean()
     rs = gain / loss.replace(0, np.nan)
     df['rsi'] = 100 - (100 / (1 + rs))
+    
     vol_short = df['v'].rolling(short_win).mean()
     vol_long = df['v'].rolling(long_win).mean()
     df['alpha'] = vol_short / vol_long.replace(0, np.nan)
+    
     diff_close = df['c'].diff()
     direction = np.where(diff_close > 0, 1, np.where(diff_close < 0, -1, 0))
     df['obv'] = (pd.Series(direction, index=df.index) * df['v']).cumsum()
@@ -211,14 +219,10 @@ def fmt_3(value):
         return "N/A"
 
 def get_rsi_badge(rsi):
-    if rsi < 55:
-        return "🟢", "ورود اولیه", "#4CAF50"
-    elif rsi < 65:
-        return "🔵", "روند پایدار", "#2196F3"
-    elif rsi < 75:
-        return "🟡", "نزدیک اشباع", "#FFC107"
-    else:
-        return "🔴", "اشباع خرید", "#F44336"
+    if rsi < 55: return "🟢", "ورود اولیه", "#4CAF50"
+    elif rsi < 65: return "🔵", "روند پایدار", "#2196F3"
+    elif rsi < 75: return "🟡", "نزدیک اشباع", "#FFC107"
+    else: return "🔴", "اشباع خرید", "#F44336"
 
 def build_signal_card(rank, sig):
     emoji, rsi_txt, _ = get_rsi_badge(sig['rsi'])
@@ -226,12 +230,11 @@ def build_signal_card(rank, sig):
     mc = format_market_cap(sig.get('market_cap'))
     alpha_val = sig.get('alpha', 0) or 0
     obv_val = sig.get('obv_alpha', 0) or 0
-    if alpha_val > 1.2 and obv_val > 1.1:
-        signal_strength = "🔥 <b>قوی</b>"
-    elif alpha_val > 1.0:
-        signal_strength = "⚡ <b>متوسط</b>"
-    else:
-        signal_strength = "🔸 <i>ضعیف</i>"
+    
+    if alpha_val > 1.2 and obv_val > 1.1: signal_strength = "🔥 <b>قوی</b>"
+    elif alpha_val > 1.0: signal_strength = "⚡ <b>متوسط</b>"
+    else: signal_strength = "🔸 <i>ضعیف</i>"
+    
     is_hot = alpha_val > 1.0
     hot_banner = ""
     if is_hot:
@@ -342,6 +345,7 @@ def run():
     load_market_caps()
     all_pairs = get_filtered_pairs()
     print(f"📊 کل نمادهای فعال برای اسکن: {len(all_pairs)}")
+    
     daily_signals = scan_stage(
         symbols_to_scan=all_pairs,
         timeframe=DAILY_TIMEFRAME,
@@ -353,6 +357,7 @@ def run():
     )
     daily_count = len(daily_signals)
     print(f"✅ {daily_count} ارز از فیلتر روزانه عبور کردند.")
+    
     if daily_count == 0:
         send_telegram_message(
             f"❌ <b>سیگنالی یافت نشد</b>\n"
@@ -360,6 +365,7 @@ def run():
             f"• شرایط:قیمت>EMA30>EMA50 و RSI>50 در تایم‌فریم {DAILY_TIMEFRAME}"
         )
         return
+        
     hourly_candidates = [(sig['symbol'], sig['info']) for sig in daily_signals]
     hourly_signals = scan_stage(
         symbols_to_scan=hourly_candidates,
@@ -372,6 +378,7 @@ def run():
     )
     hourly_count = len(hourly_signals)
     print(f"✅ {hourly_count} ارز از فیلتر ساعتی نیز عبور کردند (نهایی).")
+    
     if hourly_signals:
         signals_sorted = sorted(hourly_signals, key=lambda x: x['rsi'])
         stage_info = {
@@ -395,8 +402,11 @@ def run():
 
 # ================= RUN =================
 if __name__ == "__main__":
+    # چک نهایی قبل از اجرا
+    if not TELEGRAM_BOT_TOKEN:
+        print("❌ Error: Telegram token missing. Exiting.")
+        exit(1)
+        
     send_telegram_message("🤖 <b>ربات اسکن دو مرحله‌ای (روزانه ← ساعتی) شروع شد</b>")
     run()
     send_telegram_message("✅ <b>اسکن دو مرحله‌ای به پایان رسید</b>")
-
-
