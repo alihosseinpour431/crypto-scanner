@@ -1,5 +1,5 @@
 # scanner.py
-# ✅ نسخه نهایی بهینه‌شده برای GitHub Actions
+# ✅ نسخه نهایی بهینه‌شده برای GitHub Actions - اسکن ۳ مرحله‌ای
 
 import os
 import time
@@ -26,21 +26,25 @@ MIN_REQUIRED_BARS = 210
 ALPHA_SHORT = 3
 ALPHA_LONG = 10
 
+# ================= STAGE 2 (MACD+RSI) CONFIG =================
+STAGE2_TIMEFRAME = '30m'
+STAGE2_LIMIT = 300
+STAGE2_MIN_BARS = 200
+MACD_FAST = 36
+MACD_SLOW = 78
+MACD_SIGNAL = 30
+RSI_LENGTH = 30
+
 # ================= ENV & SECURITY FIXES =================
-# 1. اعتبارسنجی توکن
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 if not TELEGRAM_BOT_TOKEN:
     raise ValueError("❌ TELEGRAM_BOT_TOKEN is not set in environment variables!")
 
-# 2. پارس کردن امن Chat IDs (حذف آی‌دی‌های خالی)
 TELEGRAM_CHAT_IDS = [cid.strip() for cid in os.getenv("TELEGRAM_CHAT_ID", "487817626").split(",") if cid.strip()]
-
-# 3. کنترل لاگ‌ها از طریق متغیر محیطی
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
-
 COINGECKO_API = "https://api.coingecko.com/api/v3"
 
-# ================= EXCHANGE INIT WITH ERROR HANDLING =================
+# ================= EXCHANGE INIT =================
 try:
     exchange = getattr(ccxt, EXCHANGE_ID)({
         'enableRateLimit': True,
@@ -186,6 +190,29 @@ def calculate(df, short_win=ALPHA_SHORT, long_win=ALPHA_LONG):
     df['obv_alpha'] = obv_short / obv_long.replace(0, np.nan)
     return df
 
+# ================= STAGE 2: MACD + RSI CALCULATION =================
+def calculate_macd_rsi(df, fast=MACD_FAST, slow=MACD_SLOW, signal_len=MACD_SIGNAL, rsi_len=RSI_LENGTH):
+    """
+    Calculate MACD (custom: 36,78,30) and RSI (30)
+    """
+    df = df.copy()
+    
+    # MACD Calculation
+    ema_fast = df['c'].ewm(span=fast, adjust=False).mean()
+    ema_slow = df['c'].ewm(span=slow, adjust=False).mean()
+    df['macd'] = ema_fast - ema_slow
+    df['macd_signal'] = df['macd'].ewm(span=signal_len, adjust=False).mean()
+    df['macd_hist'] = df['macd'] - df['macd_signal']
+    
+    # RSI Calculation (Length 30)
+    delta = df['c'].diff()
+    gain = delta.where(delta > 0, 0).rolling(rsi_len).mean()
+    loss = -delta.where(delta < 0, 0).rolling(rsi_len).mean()
+    rs = gain / loss.replace(0, np.nan)
+    df['rsi_30'] = 100 - (100 / (1 + rs))
+    
+    return df
+
 # ================= SIGNAL CHECKERS =================
 def check_daily(df):
     last = df.iloc[-1]
@@ -208,6 +235,34 @@ def check_hourly(df):
     if cond_price and cond_ema and cond_rsi:
         return True, last['c'], last['rsi']
     return False, None, None
+
+def check_stage2_conditions(df):
+    """
+    Check Stage 2 (30m) conditions:
+    1. MACD line > Signal line
+    2. MACD Histogram > 0
+    3. RSI(30) > 50
+    """
+    if len(df) < STAGE2_MIN_BARS:
+        return False, None, None, None
+    
+    last = df.iloc[-1]
+    
+    if pd.isna(last['macd']) or pd.isna(last['macd_signal']) or pd.isna(last['macd_hist']) or pd.isna(last['rsi_30']):
+        return False, None, None, None
+    
+    macd_above_signal = last['macd'] > last['macd_signal']
+    hist_positive = last['macd_hist'] > 0
+    rsi_above_50 = last['rsi_30'] > 50
+    
+    if macd_above_signal and hist_positive and rsi_above_50:
+        return True, last['c'], last['rsi_30'], {
+            'macd': last['macd'],
+            'macd_signal': last['macd_signal'],
+            'macd_hist': last['macd_hist']
+        }
+    
+    return False, None, None, None
 
 # ================= FORMATTING =================
 def fmt_3(value):
@@ -307,232 +362,11 @@ def build_batch_message(signals, stage_info=None):
         messages.append(empty_msg)
     return messages
 
-# ================= SCAN STAGE =================
-def scan_stage(symbols_to_scan, timeframe, limit, check_func, stage_name, calc_short=ALPHA_SHORT, calc_long=ALPHA_LONG):
-    signals = []
-    total = len(symbols_to_scan)
-    print(f"🔍 شروع {stage_name}: {total} نماد برای بررسی")
-    for idx, (symbol, info) in enumerate(tqdm(symbols_to_scan, desc=stage_name, total=total), 1):
-        try:
-            df = fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-            if df is None:
-                continue
-            df = calculate(df, short_win=calc_short, long_win=calc_long)
-            ok, price, rsi = check_func(df)
-            if ok:
-                market_type = 'F' if (info.get('future', False) or info.get('swap', False)) else 'S'
-                signals.append({
-                    'symbol': symbol,
-                    'price': price,
-                    'rsi': rsi,
-                    'alpha': df.iloc[-1]['alpha'],
-                    'obv_alpha': df.iloc[-1]['obv_alpha'],
-                    'market_cap': get_market_cap(symbol),
-                    'market_type': market_type,
-                    'info': info
-                })
-        except Exception as e:
-            if DEBUG_MODE:
-                print(f"⚠️ {idx}/{total} {symbol}: {e}")
-        if idx % 50 == 0 or idx == total:
-            print(f"✅ {stage_name}: {idx}/{total} بررسی شد | سیگنال‌ها: {len(signals)}")
-        time.sleep(0.02)
-    return signals
-
-# ================= MAIN =================
-def run():
-    print("🚀 شروع اسکن دو مرحله‌ای (روزانه ← ساعتی)...")
-    load_market_caps()
-    all_pairs = get_filtered_pairs()
-    print(f"📊 کل نمادهای فعال برای اسکن: {len(all_pairs)}")
-    
-    daily_signals = scan_stage(
-        symbols_to_scan=all_pairs,
-        timeframe=DAILY_TIMEFRAME,
-        limit=DAILY_LIMIT,
-        check_func=check_daily,
-        stage_name="📅 فیلتر روزانه (1d)",
-        calc_short=3,
-        calc_long=10
-    )
-    daily_count = len(daily_signals)
-    print(f"✅ {daily_count} ارز از فیلتر روزانه عبور کردند.")
-    
-    if daily_count == 0:
-        send_telegram_message(
-            f"❌ <b>سیگنالی یافت نشد</b>\n"
-            f"• هیچ ارزی از فیلتر روزانه عبور نکرد.\n"
-            f"• شرایط:قیمت>EMA30>EMA50 و RSI>50 در تایم‌فریم {DAILY_TIMEFRAME}"
-        )
-        return
-        
-    hourly_candidates = [(sig['symbol'], sig['info']) for sig in daily_signals]
-    hourly_signals = scan_stage(
-        symbols_to_scan=hourly_candidates,
-        timeframe=HOURLY_TIMEFRAME,
-        limit=HOURLY_LIMIT,
-        check_func=check_hourly,
-        stage_name="⏰ فیلتر ساعتی (1h)",
-        calc_short=3,
-        calc_long=10
-    )
-    hourly_count = len(hourly_signals)
-    print(f"✅ {hourly_count} ارز از فیلتر ساعتی نیز عبور کردند (نهایی).")
-    
-    if hourly_signals:
-        signals_sorted = sorted(hourly_signals, key=lambda x: x['rsi'])
-        stage_info = {
-            'daily_passed': daily_count,
-            'hourly_passed': hourly_count
-        }
-        messages = build_batch_message(signals_sorted, stage_info)
-        print(f"📤 در حال ارسال {len(messages)} پیام تجمیعی ({hourly_count} سیگنال نهایی)...")
-        for msg in messages:
-            for chat_id in TELEGRAM_CHAT_IDS:
-                send_telegram_message(msg, chat_id)
-            time.sleep(0.3)
-    else:
-        send_telegram_message(
-            f"⚠️ <b>نتیجه اسکن دو مرحله‌ای:</b>\n"
-            f"• {daily_count} ارز از فیلتر روزانه عبور کردند.\n"
-            f"• اما هیچ‌کدام از فیلتر ساعتی عبور نکردند.\n"
-            f"• شرایط نهایی: قیمت>EMA50>EMA200 و RSI>50 در تایم‌فریم {HOURLY_TIMEFRAME}"
-        )
-    print("✅ پایان اسکن دو مرحله‌ای")
-
-# ================= RUN =================
-if __name__ == "__main__":
-    # چک نهایی قبل از اجرا
-    if not TELEGRAM_BOT_TOKEN:
-        print("❌ Error: Telegram token missing. Exiting.")
-        exit(1)
-        
-    send_telegram_message("🤖 <b>ربات اسکن دو مرحله‌ای (روزانه ← ساعتی) شروع شد</b>")
-    run()
-    send_telegram_message("✅ <b>اسکن دو مرحله‌ای به پایان رسید</b>")
-
-
-
-# ================= STAGE 2: MACD + RSI SCAN (30m) =================
-
-STAGE2_TIMEFRAME = '30m'
-STAGE2_LIMIT = 300
-STAGE2_MIN_BARS = 200
-
-# MACD Parameters (Custom)
-MACD_FAST = 36
-MACD_SLOW = 78
-MACD_SIGNAL = 30
-
-# RSI Parameter
-RSI_LENGTH = 30
-
-def calculate_macd_rsi(df, fast=MACD_FAST, slow=MACD_SLOW, signal_len=MACD_SIGNAL, rsi_len=RSI_LENGTH):
-    """
-    Calculate MACD and RSI indicators
-    MACD: Custom parameters (36, 78, 30)
-    RSI: Length 30
-    """
-    df = df.copy()
-    
-    # Calculate MACD
-    ema_fast = df['c'].ewm(span=fast, adjust=False).mean()
-    ema_slow = df['c'].ewm(span=slow, adjust=False).mean()
-    df['macd'] = ema_fast - ema_slow
-    df['macd_signal'] = df['macd'].ewm(span=signal_len, adjust=False).mean()
-    df['macd_hist'] = df['macd'] - df['macd_signal']
-    
-    # Calculate RSI (Length 30)
-    delta = df['c'].diff()
-    gain = delta.where(delta > 0, 0).rolling(rsi_len).mean()
-    loss = -delta.where(delta < 0, 0).rolling(rsi_len).mean()
-    rs = gain / loss.replace(0, np.nan)
-    df['rsi_30'] = 100 - (100 / (1 + rs))
-    
-    return df
-
-def check_stage2_conditions(df):
-    """
-    Check Stage 2 conditions:
-    1. MACD line > Signal line
-    2. MACD Histogram > 0
-    3. RSI(30) > 50
-    """
-    if len(df) < STAGE2_MIN_BARS:
-        return False, None, None, None
-    
-    last = df.iloc[-1]
-    
-    # Check if values are valid
-    if pd.isna(last['macd']) or pd.isna(last['macd_signal']) or pd.isna(last['macd_hist']) or pd.isna(last['rsi_30']):
-        return False, None, None, None
-    
-    # Conditions
-    macd_above_signal = last['macd'] > last['macd_signal']
-    hist_positive = last['macd_hist'] > 0
-    rsi_above_50 = last['rsi_30'] > 50
-    
-    if macd_above_signal and hist_positive and rsi_above_50:
-        return True, last['c'], last['rsi_30'], {
-            'macd': last['macd'],
-            'macd_signal': last['macd_signal'],
-            'macd_hist': last['macd_hist']
-        }
-    
-    return False, None, None, None
-
-def scan_stage2(symbols_to_scan, stage_name="🔍 اسکن نهایی (30m)"):
-    """
-    Scan Stage 2: MACD(36,78,30) + RSI(30) on 30m timeframe
-    """
-    signals = []
-    total = len(symbols_to_scan)
-    print(f"🚀 شروع {stage_name}: {total} نماد برای بررسی")
-    
-    for idx, (symbol, info) in enumerate(tqdm(symbols_to_scan, desc=stage_name, total=total), 1):
-        try:
-            # Fetch 30m data
-            df = fetch_ohlcv(symbol, timeframe=STAGE2_TIMEFRAME, limit=STAGE2_LIMIT)
-            if df is None:
-                continue
-            
-            # Calculate MACD and RSI
-            df = calculate_macd_rsi(df)
-            
-            # Check conditions
-            ok, price, rsi, macd_data = check_stage2_conditions(df)
-            
-            if ok:
-                market_type = 'F' if (info.get('future', False) or info.get('swap', False)) else 'S'
-                signals.append({
-                    'symbol': symbol,
-                    'price': price,
-                    'rsi': rsi,
-                    'macd': macd_data['macd'],
-                    'macd_signal': macd_data['macd_signal'],
-                    'macd_hist': macd_data['macd_hist'],
-                    'market_cap': get_market_cap(symbol),
-                    'market_type': market_type,
-                    'info': info
-                })
-                
-        except Exception as e:
-            if DEBUG_MODE:
-                print(f"⚠️ {idx}/{total} {symbol}: {e}")
-        
-        # Progress update
-        if idx % 50 == 0 or idx == total:
-            print(f"✅ {stage_name}: {idx}/{total} بررسی شد | سیگنال‌ها: {len(signals)}")
-        
-        time.sleep(0.02)
-    
-    return signals
-
+# ================= STAGE 2: FORMATTING =================
 def build_stage2_card(rank, sig):
     """
-    Build signal card for Stage 2 results
+    Build signal card for Stage 2 (30m MACD+RSI) results
     """
-    # RSI Badge
     rsi_val = sig['rsi']
     if rsi_val < 60:
         rsi_emoji, rsi_txt = "🟢", "روند صعودی"
@@ -543,13 +377,8 @@ def build_stage2_card(rank, sig):
     else:
         rsi_emoji, rsi_txt = "🔴", "اشباع خرید"
     
-    # Type badge
     type_badge = "🅂 <i>Spot</i>" if sig['market_type'] == 'S' else "🄵 <i>Futures</i>"
-    
-    # Market cap
     mc = format_market_cap(sig.get('market_cap'))
-    
-    # MACD status
     macd_hist = sig.get('macd_hist', 0) or 0
     macd_status = "🟢 مثبت" if macd_hist > 0 else "🔴 منفی"
     
@@ -622,10 +451,83 @@ def build_stage2_message(signals, stage1_count, stage2_count):
     
     return messages
 
-# ================= MODIFY MAIN FUNCTION =================
+# ================= SCAN STAGE =================
+def scan_stage(symbols_to_scan, timeframe, limit, check_func, stage_name, calc_short=ALPHA_SHORT, calc_long=ALPHA_LONG):
+    signals = []
+    total = len(symbols_to_scan)
+    print(f"🔍 شروع {stage_name}: {total} نماد برای بررسی")
+    for idx, (symbol, info) in enumerate(tqdm(symbols_to_scan, desc=stage_name, total=total), 1):
+        try:
+            df = fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+            if df is None:
+                continue
+            df = calculate(df, short_win=calc_short, long_win=calc_long)
+            ok, price, rsi = check_func(df)
+            if ok:
+                market_type = 'F' if (info.get('future', False) or info.get('swap', False)) else 'S'
+                signals.append({
+                    'symbol': symbol,
+                    'price': price,
+                    'rsi': rsi,
+                    'alpha': df.iloc[-1]['alpha'],
+                    'obv_alpha': df.iloc[-1]['obv_alpha'],
+                    'market_cap': get_market_cap(symbol),
+                    'market_type': market_type,
+                    'info': info
+                })
+        except Exception as e:
+            if DEBUG_MODE:
+                print(f"⚠️ {idx}/{total} {symbol}: {e}")
+        if idx % 50 == 0 or idx == total:
+            print(f"✅ {stage_name}: {idx}/{total} بررسی شد | سیگنال‌ها: {len(signals)}")
+        time.sleep(0.02)
+    return signals
 
+def scan_stage2(symbols_to_scan, stage_name="🔍 اسکن نهایی (30m)"):
+    """
+    Scan Stage 2: MACD(36,78,30) + RSI(30) on 30m timeframe
+    """
+    signals = []
+    total = len(symbols_to_scan)
+    print(f"🚀 شروع {stage_name}: {total} نماد برای بررسی")
+    
+    for idx, (symbol, info) in enumerate(tqdm(symbols_to_scan, desc=stage_name, total=total), 1):
+        try:
+            df = fetch_ohlcv(symbol, timeframe=STAGE2_TIMEFRAME, limit=STAGE2_LIMIT)
+            if df is None:
+                continue
+            
+            df = calculate_macd_rsi(df)
+            ok, price, rsi, macd_data = check_stage2_conditions(df)
+            
+            if ok:
+                market_type = 'F' if (info.get('future', False) or info.get('swap', False)) else 'S'
+                signals.append({
+                    'symbol': symbol,
+                    'price': price,
+                    'rsi': rsi,
+                    'macd': macd_data['macd'],
+                    'macd_signal': macd_data['macd_signal'],
+                    'macd_hist': macd_data['macd_hist'],
+                    'market_cap': get_market_cap(symbol),
+                    'market_type': market_type,
+                    'info': info
+                })
+                
+        except Exception as e:
+            if DEBUG_MODE:
+                print(f"⚠️ {idx}/{total} {symbol}: {e}")
+        
+        if idx % 50 == 0 or idx == total:
+            print(f"✅ {stage_name}: {idx}/{total} بررسی شد | سیگنال‌ها: {len(signals)}")
+        
+        time.sleep(0.02)
+    
+    return signals
+
+# ================= MAIN =================
 def run():
-    print("🚀 شروع اسکن دو مرحله‌ای (روزانه ← ساعتی)...")
+    print("🚀 شروع اسکن سه مرحله‌ای (روزانه ← ساعتی ← 30m)...")
     load_market_caps()
     all_pairs = get_filtered_pairs()
     print(f"📊 کل نمادهای فعال برای اسکن: {len(all_pairs)}")
@@ -685,7 +587,7 @@ def run():
             f"• اما هیچ‌کدام از فیلتر ساعتی عبور نکردند."
         )
     
-    # ================= STAGE 3: MACD + RSI SCAN =================
+    # ================= STAGE 3: MACD + RSI SCAN (30m) =================
     print("\n" + "="*60)
     print("🎯 شروع اسکن نهایی (MACD + RSI در تایم‌فریم 30 دقیقه)")
     print("="*60)
@@ -700,7 +602,6 @@ def run():
         print(f"✅ {stage2_count} ارز از اسکن نهایی عبور کردند.")
         
         if stage2_signals:
-            # Sort by RSI
             stage2_sorted = sorted(stage2_signals, key=lambda x: x['rsi'], reverse=True)
             messages = build_stage2_message(stage2_sorted, daily_count, hourly_count)
             print(f"📤 در حال ارسال {len(messages)} پیام نهایی ({stage2_count} سیگنال)...")
