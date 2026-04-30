@@ -410,3 +410,320 @@ if __name__ == "__main__":
     send_telegram_message("🤖 <b>ربات اسکن دو مرحله‌ای (روزانه ← ساعتی) شروع شد</b>")
     run()
     send_telegram_message("✅ <b>اسکن دو مرحله‌ای به پایان رسید</b>")
+
+
+
+# ================= STAGE 2: MACD + RSI SCAN (30m) =================
+
+STAGE2_TIMEFRAME = '30m'
+STAGE2_LIMIT = 300
+STAGE2_MIN_BARS = 200
+
+# MACD Parameters (Custom)
+MACD_FAST = 36
+MACD_SLOW = 78
+MACD_SIGNAL = 30
+
+# RSI Parameter
+RSI_LENGTH = 30
+
+def calculate_macd_rsi(df, fast=MACD_FAST, slow=MACD_SLOW, signal_len=MACD_SIGNAL, rsi_len=RSI_LENGTH):
+    """
+    Calculate MACD and RSI indicators
+    MACD: Custom parameters (36, 78, 30)
+    RSI: Length 30
+    """
+    df = df.copy()
+    
+    # Calculate MACD
+    ema_fast = df['c'].ewm(span=fast, adjust=False).mean()
+    ema_slow = df['c'].ewm(span=slow, adjust=False).mean()
+    df['macd'] = ema_fast - ema_slow
+    df['macd_signal'] = df['macd'].ewm(span=signal_len, adjust=False).mean()
+    df['macd_hist'] = df['macd'] - df['macd_signal']
+    
+    # Calculate RSI (Length 30)
+    delta = df['c'].diff()
+    gain = delta.where(delta > 0, 0).rolling(rsi_len).mean()
+    loss = -delta.where(delta < 0, 0).rolling(rsi_len).mean()
+    rs = gain / loss.replace(0, np.nan)
+    df['rsi_30'] = 100 - (100 / (1 + rs))
+    
+    return df
+
+def check_stage2_conditions(df):
+    """
+    Check Stage 2 conditions:
+    1. MACD line > Signal line
+    2. MACD Histogram > 0
+    3. RSI(30) > 50
+    """
+    if len(df) < STAGE2_MIN_BARS:
+        return False, None, None, None
+    
+    last = df.iloc[-1]
+    
+    # Check if values are valid
+    if pd.isna(last['macd']) or pd.isna(last['macd_signal']) or pd.isna(last['macd_hist']) or pd.isna(last['rsi_30']):
+        return False, None, None, None
+    
+    # Conditions
+    macd_above_signal = last['macd'] > last['macd_signal']
+    hist_positive = last['macd_hist'] > 0
+    rsi_above_50 = last['rsi_30'] > 50
+    
+    if macd_above_signal and hist_positive and rsi_above_50:
+        return True, last['c'], last['rsi_30'], {
+            'macd': last['macd'],
+            'macd_signal': last['macd_signal'],
+            'macd_hist': last['macd_hist']
+        }
+    
+    return False, None, None, None
+
+def scan_stage2(symbols_to_scan, stage_name="🔍 اسکن نهایی (30m)"):
+    """
+    Scan Stage 2: MACD(36,78,30) + RSI(30) on 30m timeframe
+    """
+    signals = []
+    total = len(symbols_to_scan)
+    print(f"🚀 شروع {stage_name}: {total} نماد برای بررسی")
+    
+    for idx, (symbol, info) in enumerate(tqdm(symbols_to_scan, desc=stage_name, total=total), 1):
+        try:
+            # Fetch 30m data
+            df = fetch_ohlcv(symbol, timeframe=STAGE2_TIMEFRAME, limit=STAGE2_LIMIT)
+            if df is None:
+                continue
+            
+            # Calculate MACD and RSI
+            df = calculate_macd_rsi(df)
+            
+            # Check conditions
+            ok, price, rsi, macd_data = check_stage2_conditions(df)
+            
+            if ok:
+                market_type = 'F' if (info.get('future', False) or info.get('swap', False)) else 'S'
+                signals.append({
+                    'symbol': symbol,
+                    'price': price,
+                    'rsi': rsi,
+                    'macd': macd_data['macd'],
+                    'macd_signal': macd_data['macd_signal'],
+                    'macd_hist': macd_data['macd_hist'],
+                    'market_cap': get_market_cap(symbol),
+                    'market_type': market_type,
+                    'info': info
+                })
+                
+        except Exception as e:
+            if DEBUG_MODE:
+                print(f"⚠️ {idx}/{total} {symbol}: {e}")
+        
+        # Progress update
+        if idx % 50 == 0 or idx == total:
+            print(f"✅ {stage_name}: {idx}/{total} بررسی شد | سیگنال‌ها: {len(signals)}")
+        
+        time.sleep(0.02)
+    
+    return signals
+
+def build_stage2_card(rank, sig):
+    """
+    Build signal card for Stage 2 results
+    """
+    # RSI Badge
+    rsi_val = sig['rsi']
+    if rsi_val < 60:
+        rsi_emoji, rsi_txt = "🟢", "روند صعودی"
+    elif rsi_val < 70:
+        rsi_emoji, rsi_txt = "🔵", "قدرتمند"
+    elif rsi_val < 80:
+        rsi_emoji, rsi_txt = "🟡", "نزدیک اشباع"
+    else:
+        rsi_emoji, rsi_txt = "🔴", "اشباع خرید"
+    
+    # Type badge
+    type_badge = "🅂 <i>Spot</i>" if sig['market_type'] == 'S' else "🄵 <i>Futures</i>"
+    
+    # Market cap
+    mc = format_market_cap(sig.get('market_cap'))
+    
+    # MACD status
+    macd_hist = sig.get('macd_hist', 0) or 0
+    macd_status = "🟢 مثبت" if macd_hist > 0 else "🔴 منفی"
+    
+    card = (
+        f"┌─ {rank}. {rsi_emoji} <b>{escape(sig['symbol'])}</b> {type_badge}\n"
+        f"│\n"
+        f"│  💰 قیمت: <code>{sig['price']:,.4f} USDT</code>\n"
+        f"│  📊 RSI(30): <code>{rsi_val:5.1f}</code> │ <i>{rsi_txt}</i>\n"
+        f"│  📈 MACD: <code>{fmt_3(sig['macd'])}</code>\n"
+        f"│  📉 Signal: <code>{fmt_3(sig['macd_signal'])}</code>\n"
+        f"│  📊 Histogram: <code>{fmt_3(macd_hist)}</code> │ {macd_status}\n"
+        f"│  {mc}\n"
+        f"└─────────────────────────────\n"
+    )
+    return card
+
+def build_stage2_message(signals, stage1_count, stage2_count):
+    """
+    Build final message for Stage 2 results
+    """
+    now_tehran = datetime.now(pytz.timezone('Asia/Tehran'))
+    tehran_time = jdatetime.datetime.fromgregorian(datetime=now_tehran).strftime('%Y/%m/%d %H:%M:%S')
+    
+    header = (
+        f"🎯 <b>اسکن نهایی | تایم‌فریم 30 دقیقه</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📋 <b>فیلترهای اعمال شده:</b>\n"
+        f"├─ 📊 MACD(36,78,30): خط MACD > Signal\n"
+        f"├─ 📈 Histogram MACD > 0 (مثبت)\n"
+        f"└─ 💪 RSI(30) > 50\n"
+        f"\n📈 <b>آمار نهایی:</b>\n"
+        f"├─ اسکن 1 (روزانه): <code>{stage1_count:4d}</code> نماد\n"
+        f"├─ اسکن 2 (ساعتی): <code>{stage2_count:4d}</code> نماد\n"
+        f"└─ ✅ نهایی (30m): <code>{len(signals):4d}</code> نماد\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    )
+    
+    footer = (
+        f"\n⏰ بروزرسانی: <b>{tehran_time}</b> 🇮🇷 تهران\n"
+        f"⚠️ <i>این گزارش صرفاً تحلیلی است و توصیه مالی محسوب نمی‌شود.</i>\n"
+        f"🤖 <code>AlphaScanner v2.2 - Stage 2</code>"
+    )
+    
+    messages = []
+    MAX_LEN = 4000
+    body = ""
+    
+    for rank, sig in enumerate(signals, 1):
+        card = build_stage2_card(rank, sig)
+        if len(header) + len(body) + len(card) + len(footer) > MAX_LEN - 200:
+            full_msg = header + body + footer
+            messages.append(full_msg)
+            body = card
+        else:
+            body += card
+    
+    if body.strip():
+        final_msg = header + body + footer
+        messages.append(final_msg)
+    
+    if not messages:
+        empty_msg = (
+            f"{header}\n"
+            f"❌ <b>هیچ ارزی شرایط نهایی را نداشت.</b>\n"
+            f"• MACD(36,78,30) باید مثبت باشد و خط MACD بالای Signal\n"
+            f"• RSI(30) باید بالای 50 باشد\n"
+            f"{footer}"
+        )
+        messages.append(empty_msg)
+    
+    return messages
+
+# ================= MODIFY MAIN FUNCTION =================
+
+def run():
+    print("🚀 شروع اسکن دو مرحله‌ای (روزانه ← ساعتی)...")
+    load_market_caps()
+    all_pairs = get_filtered_pairs()
+    print(f"📊 کل نمادهای فعال برای اسکن: {len(all_pairs)}")
+    
+    # Stage 1: Daily filter
+    daily_signals = scan_stage(
+        symbols_to_scan=all_pairs,
+        timeframe=DAILY_TIMEFRAME,
+        limit=DAILY_LIMIT,
+        check_func=check_daily,
+        stage_name="📅 فیلتر روزانه (1d)",
+        calc_short=3,
+        calc_long=10
+    )
+    daily_count = len(daily_signals)
+    print(f"✅ {daily_count} ارز از فیلتر روزانه عبور کردند.")
+    
+    if daily_count == 0:
+        send_telegram_message(
+            f"❌ <b>سیگنالی یافت نشد</b>\n"
+            f"• هیچ ارزی از فیلتر روزانه عبور نکرد.\n"
+            f"• شرایط: قیمت>EMA30>EMA50 و RSI>50 در تایم‌فریم {DAILY_TIMEFRAME}"
+        )
+        return
+    
+    # Stage 2: Hourly filter
+    hourly_candidates = [(sig['symbol'], sig['info']) for sig in daily_signals]
+    hourly_signals = scan_stage(
+        symbols_to_scan=hourly_candidates,
+        timeframe=HOURLY_TIMEFRAME,
+        limit=HOURLY_LIMIT,
+        check_func=check_hourly,
+        stage_name="⏰ فیلتر ساعتی (1h)",
+        calc_short=3,
+        calc_long=10
+    )
+    hourly_count = len(hourly_signals)
+    print(f"✅ {hourly_count} ارز از فیلتر ساعتی نیز عبور کردند.")
+    
+    # Send Stage 1 & 2 results
+    if hourly_signals:
+        signals_sorted = sorted(hourly_signals, key=lambda x: x['rsi'])
+        stage_info = {
+            'daily_passed': daily_count,
+            'hourly_passed': hourly_count
+        }
+        messages = build_batch_message(signals_sorted, stage_info)
+        print(f"📤 در حال ارسال {len(messages)} پیام تجمیعی ({hourly_count} سیگنال)...")
+        for msg in messages:
+            for chat_id in TELEGRAM_CHAT_IDS:
+                send_telegram_message(msg, chat_id)
+            time.sleep(0.3)
+    else:
+        send_telegram_message(
+            f"⚠️ <b>نتیجه اسکن دو مرحله‌ای:</b>\n"
+            f"• {daily_count} ارز از فیلتر روزانه عبور کردند.\n"
+            f"• اما هیچ‌کدام از فیلتر ساعتی عبور نکردند."
+        )
+    
+    # ================= STAGE 3: MACD + RSI SCAN =================
+    print("\n" + "="*60)
+    print("🎯 شروع اسکن نهایی (MACD + RSI در تایم‌فریم 30 دقیقه)")
+    print("="*60)
+    
+    if hourly_count > 0:
+        stage2_candidates = [(sig['symbol'], sig['info']) for sig in hourly_signals]
+        stage2_signals = scan_stage2(
+            symbols_to_scan=stage2_candidates,
+            stage_name="🔍 اسکن نهایی (30m - MACD+RSI)"
+        )
+        stage2_count = len(stage2_signals)
+        print(f"✅ {stage2_count} ارز از اسکن نهایی عبور کردند.")
+        
+        if stage2_signals:
+            # Sort by RSI
+            stage2_sorted = sorted(stage2_signals, key=lambda x: x['rsi'], reverse=True)
+            messages = build_stage2_message(stage2_sorted, daily_count, hourly_count)
+            print(f"📤 در حال ارسال {len(messages)} پیام نهایی ({stage2_count} سیگنال)...")
+            for msg in messages:
+                for chat_id in TELEGRAM_CHAT_IDS:
+                    send_telegram_message(msg, chat_id)
+                time.sleep(0.3)
+        else:
+            send_telegram_message(
+                f"⚠️ <b>اسکن نهایی (30m):</b>\n"
+                f"• {hourly_count} ارز از اسکن ساعتی عبور کردند.\n"
+                f"• اما هیچ‌کدام شرایط MACD + RSI را نداشتند.\n"
+                f"• شرایط: MACD(36,78,30) > 0 و RSI(30) > 50"
+            )
+    
+    print("✅ پایان کامل اسکن سه مرحله‌ای")
+
+# ================= RUN =================
+if __name__ == "__main__":
+    if not TELEGRAM_BOT_TOKEN:
+        print("❌ Error: Telegram token missing. Exiting.")
+        exit(1)
+    
+    send_telegram_message("🤖 <b>ربات اسکن سه مرحله‌ای شروع شد</b>\n📅 روزانه ← ⏰ ساعتی ← 🎯 30 دقیقه (MACD+RSI)")
+    run()
+    send_telegram_message("✅ <b>اسکن سه مرحله‌ای به پایان رسید</b>")
