@@ -1,5 +1,5 @@
 # scanner.py
-# ✅ نسخه نهایی بهینه‌شده برای GitHub Actions - اسکن ۳ مرحله‌ای + خروجی TradingView
+# ✅ نسخه نهایی بهینه‌شده برای GitHub Actions - اسکن ۳ مرحله‌ای
 
 import os
 import time
@@ -451,16 +451,6 @@ def build_stage2_message(signals, stage1_count, stage2_count):
     
     return messages
 
-# ================= TRADINGVIEW EXPORT (NEW) =================
-def build_tradingview_list(signals):
-    """
-    Build a clean comma-separated list of symbols for TradingView copy-paste
-    Example: BTC, ETH, SOL, XRP
-    """
-    # Remove /USDT suffix and keep only base symbol
-    symbols = [sig['symbol'].split('/')[0].upper().strip() for sig in signals]
-    return ", ".join(symbols)
-
 # ================= SCAN STAGE =================
 def scan_stage(symbols_to_scan, timeframe, limit, check_func, stage_name, calc_short=ALPHA_SHORT, calc_long=ALPHA_LONG):
     signals = []
@@ -619,24 +609,6 @@ def run():
                 for chat_id in TELEGRAM_CHAT_IDS:
                     send_telegram_message(msg, chat_id)
                 time.sleep(0.3)
-            
-            # ✅✅✅ NEW: Send TradingView copy-paste list ✅✅✅
-            tv_symbols = build_tradingview_list(stage2_sorted)
-            tv_msg = (
-                f"📋 <b>لیست آماده کپی در تریدینگ‌ویو:</b>\n"
-                f"<code>{tv_symbols}</code>\n\n"
-                f"💡 <b>نحوه استفاده سریع:</b>\n"
-                f"1️⃣ روی کد بالا کلیک کن و Copy بزن\n"
-                f"2️⃣ در TradingView به پنل Watchlist برو\n"
-                f"3️⃣ راست‌کلیک روی لیست → <b>Import from clipboard</b>\n"
-                f"4️⃣ تمام ارزها یکجا اضافه می‌شوند! 🎯\n"
-                f"\n🔗 لینک مستقیم واچ‌لیست:\n"
-                f"<a href='https://www.tradingview.com/watchlists/'>باز کردن تریدینگ‌ویو</a>"
-            )
-            for chat_id in TELEGRAM_CHAT_IDS:
-                send_telegram_message(tv_msg, chat_id)
-                time.sleep(0.3)
-                
         else:
             send_telegram_message(
                 f"⚠️ <b>اسکن نهایی (30m):</b>\n"
