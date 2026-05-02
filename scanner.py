@@ -1,5 +1,4 @@
-scanner.py
-✅ نسخه نهایی بهینه‌شده برای GitHub Actions - اسکن ۴ مرحله‌ای (فیلتر + رتبه‌بندی هوشمند)
+# ✅ نسخه نهایی بهینه‌شده برای GitHub Actions - اسکن ۴ مرحله‌ای (فیلتر + رتبه‌بندی هوشمند)
 import os
 import time
 import requests
