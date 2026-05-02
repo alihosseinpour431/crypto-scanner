@@ -1,8 +1,0 @@
-python-telegram-bot
-requests
-ccxt
-pandas
-pytz
-jdatetime
-numpy
-tqdm
