@@ -11,7 +11,7 @@ from datetime import datetime
 from html import escape
 from tqdm.auto import tqdm
 
-================= CONFIG =================
+#================= CONFIG =================
 EXCHANGE_ID = 'xt'
 SCAN_SPOT = True
 SCAN_FUTURES = True
@@ -22,7 +22,7 @@ HOURLY_LIMIT = 300
 MIN_REQUIRED_BARS = 210
 ALPHA_SHORT = 3
 ALPHA_LONG = 10
-================= STAGE 2 (MACD+RSI) CONFIG =================
+#================= STAGE 2 (MACD+RSI) CONFIG =================
 STAGE2_TIMEFRAME = '30m'
 STAGE2_LIMIT = 300
 STAGE2_MIN_BARS = 200
@@ -30,7 +30,7 @@ MACD_FAST = 36
 MACD_SLOW = 78
 MACD_SIGNAL = 30
 RSI_LENGTH = 30
-================= ENV & SECURITY FIXES =================
+#================= ENV & SECURITY FIXES =================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 if not TELEGRAM_BOT_TOKEN:
 raise ValueError("❌ TELEGRAM_BOT_TOKEN is not set in environment variables!")
@@ -38,7 +38,7 @@ TELEGRAM_CHAT_IDS = [cid.strip() for cid in os.getenv("TELEGRAM_CHAT_ID", "48781
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
 COINGECKO_API = "https://api.coingecko.com/api/v3"
 
-================= EXCHANGE INIT =================
+#================= EXCHANGE INIT =================
 try:
 exchange = getattr(ccxt, EXCHANGE_ID)({
 'enableRateLimit': True,
@@ -49,11 +49,11 @@ except Exception as e:
 print(f"❌ Critical Error initializing exchange: {e}")
 exit(1)
 
-================= CACHE =================
+#================= CACHE =================
 market_cap_cache = {}
 symbol_type_cache = {}
 
-================= TELEGRAM =================
+#================= TELEGRAM =================
 def send_telegram_message(text, chat_id=None):
 targets = [chat_id] if chat_id else TELEGRAM_CHAT_IDS
 for cid in targets:
@@ -74,7 +74,7 @@ print(f"⚠️ Telegram ({cid}): {r.status_code} | {r.text}")
 except Exception as e:
 print(f"❌ Telegram Error ({cid}): {e}")
 
-================= COINGECKO MARKET CAP =================
+#================= COINGECKO MARKET CAP =================
 def load_market_caps():
 if market_cap_cache:
 return
@@ -121,7 +121,7 @@ if value >= 1e6: return f"💎 <b>${value/1e6:.2f}M </b> "
 if value >= 1e3: return f"💎 <b>${value/1e3:.2f}K </b> "
 return f"💎 <b>${value:,.0f} </b> "
 
-================= MARKET =================
+#================= MARKET =================
 def get_symbol_type(symbol):
 if symbol in symbol_type_cache:
 return symbol_type_cache[symbol]
@@ -145,7 +145,7 @@ if (SCAN_SPOT and is_spot) or (SCAN_FUTURES and is_future):
 pairs.append((symbol, info))
 return pairs
 
-================= DATA =================
+#================= DATA =================
 def fetch_ohlcv(symbol, timeframe, limit):
 try:
 data = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
@@ -159,7 +159,7 @@ if DEBUG_MODE:
 print(f"⚠️ Fetch error {symbol}: {e}")
 return None
 
-================= INDICATORS =================
+#================= INDICATORS =================
 def calculate(df, short_win=ALPHA_SHORT, long_win=ALPHA_LONG):
 df = df.copy()
 df['ema30'] = df['c'].ewm(span=30, adjust=False).mean()
@@ -183,7 +183,7 @@ obv_long = df['obv'].rolling(long_win).mean()
 df['obv_alpha'] = obv_short / obv_long.replace(0, np.nan)
 return df
 
-================= STAGE 2: MACD + RSI CALCULATION =================
+#================= STAGE 2: MACD + RSI CALCULATION =================
 def calculate_macd_rsi(df, fast=MACD_FAST, slow=MACD_SLOW, signal_len=MACD_SIGNAL, rsi_len=RSI_LENGTH):
 df = df.copy()
 ema_fast = df['c'].ewm(span=fast, adjust=False).mean()
@@ -199,7 +199,7 @@ rs = gain / loss.replace(0, np.nan)
 df['rsi_30'] = 100 - (100 / (1 + rs))
 return df
 
-================= SIGNAL CHECKERS =================
+#================= SIGNAL CHECKERS =================
 def check_daily(df):
 last = df.iloc[-1]
 if pd.isna(last['ema30']) or pd.isna(last['ema50']) or pd.isna(last['rsi']):
@@ -239,7 +239,7 @@ return True, last['c'], last['rsi_30'], {
 }
 return False, None, None, None
 
-================= FORMATTING =================
+#================= FORMATTING =================
 def fmt_3(value):
 if value is None or (isinstance(value, float) and np.isnan(value)):
 return "N/A"
@@ -335,7 +335,7 @@ f"{footer} "
 messages.append(empty_msg)
 return messages
 
-================= STAGE 2: FORMATTING =================
+#================= STAGE 2: FORMATTING =================
 def build_stage2_card(rank, sig):
 rsi_val = sig['rsi']
 if rsi_val < 60:
@@ -409,7 +409,7 @@ f"{footer} "
 messages.append(empty_msg)
 return messages
 
-================= SCAN STAGE =================
+#================= SCAN STAGE =================
 def scan_stage(symbols_to_scan, timeframe, limit, check_func, stage_name, calc_short=ALPHA_SHORT, calc_long=ALPHA_LONG):
 signals = []
 total = len(symbols_to_scan)
@@ -601,7 +601,7 @@ if not messages:
 messages.append(f"{header}\n❌ هیچ ارزی امتیاز حدنصاب را کسب نکرد.\n{footer}")
 return messages
 
-================= MAIN =================
+#================= MAIN =================
 def run():
 print("🚀 شروع اسکن سه مرحله‌ای (روزانه ← ساعتی ← 30m)...")
 load_market_caps()
@@ -712,7 +712,7 @@ send_telegram_message(f"⚠️ <b>اسکن نهایی:</b> ارزها فیلتر
 
 print("✅ پایان کامل اسکن چهار مرحله‌ای ")
 
-================= RUN =================
+#================= RUN =================
 if __name__ == "__main__":
 if not TELEGRAM_BOT_TOKEN:
 print("❌ Error: Telegram token missing. Exiting.")
