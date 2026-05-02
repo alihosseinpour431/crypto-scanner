@@ -3,7 +3,7 @@ name: Crypto Scanner 3-Stage
 on:
   repository_dispatch:
     types: [start_scan]
-  workflow_dispatch:  # برای تست دستی
+  workflow_dispatch:
 
 jobs:
   scan-crypto:
