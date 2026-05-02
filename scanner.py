@@ -1,5 +1,5 @@
 # scanner.py
-# ✅ نسخه نهایی بهینه‌شده برای GitHub Actions - اسکن ۳ مرحله‌ای
+# ✅ نسخه نهایی بهینه‌شده برای GitHub Actions - اسکن ۳ مرحله‌ای + Risk Sort + Deduplication
 
 import os
 import time
@@ -141,15 +141,34 @@ def get_symbol_type(symbol):
         return 'S'
 
 def get_filtered_pairs():
-    pairs = []
+    """
+    ✅ دریافت جفت‌ارزها با حذف نمادهای تکراری
+    اولویت: اسپات > فیوچرز (اگر ارزی هم اسپات باشد هم فیوچرز، فقط اسپات را نگه می‌داریم)
+    """
+    symbol_map = {}  # base_symbol -> (symbol, info, is_spot)
+    
     for symbol, info in exchange_markets.items():
-        if not info.get('active'): continue
-        if info.get('quote') != 'USDT': continue
+        if not info.get('active'): 
+            continue
+        if info.get('quote') != 'USDT': 
+            continue
+        
         is_spot = info.get('spot', False)
         is_future = info.get('future', False) or info.get('swap', False)
+        
         if (SCAN_SPOT and is_spot) or (SCAN_FUTURES and is_future):
-            pairs.append((symbol, info))
-    return pairs
+            base = symbol.split('/')[0].upper().strip()
+            
+            if base not in symbol_map:
+                # اولین بار: ذخیره کن
+                symbol_map[base] = (symbol, info, is_spot)
+            elif is_spot and not symbol_map[base][2]:
+                # اگر الان اسپات پیدا شد و قبلی فیوچرز بود، جایگزین کن (اولویت با اسپات)
+                symbol_map[base] = (symbol, info, True)
+            # در غیر این صورت: قبلاً اسپات بوده، فیوچرز جدید را نادیده بگیر
+    
+    # برگرداندن لیست نهایی به فرمت (symbol, info)
+    return [(sym, inf) for sym, inf, _ in symbol_map.values()]
 
 # ================= DATA =================
 def fetch_ohlcv(symbol, timeframe, limit):
@@ -190,12 +209,15 @@ def calculate(df, short_win=ALPHA_SHORT, long_win=ALPHA_LONG):
     df['obv_alpha'] = obv_short / obv_long.replace(0, np.nan)
     return df
 
-# ================= STAGE 2: MACD + RSI CALCULATION =================
+# ================= STAGE 2: MACD + RSI + EMA200 CALCULATION =================
 def calculate_macd_rsi(df, fast=MACD_FAST, slow=MACD_SLOW, signal_len=MACD_SIGNAL, rsi_len=RSI_LENGTH):
     """
-    Calculate MACD (custom: 36,78,30) and RSI (30)
+    Calculate MACD (custom: 36,78,30), RSI (30) and EMA200 for Risk calculation
     """
     df = df.copy()
+    
+    # EMA200 for Risk calculation
+    df['ema200'] = df['c'].ewm(span=200, adjust=False).mean()
     
     # MACD Calculation
     ema_fast = df['c'].ewm(span=fast, adjust=False).mean()
@@ -242,14 +264,15 @@ def check_stage2_conditions(df):
     1. MACD line > Signal line
     2. MACD Histogram > 0
     3. RSI(30) > 50
+    Returns: ok, price, rsi, macd_data, ema200
     """
     if len(df) < STAGE2_MIN_BARS:
-        return False, None, None, None
+        return False, None, None, None, None
     
     last = df.iloc[-1]
     
-    if pd.isna(last['macd']) or pd.isna(last['macd_signal']) or pd.isna(last['macd_hist']) or pd.isna(last['rsi_30']):
-        return False, None, None, None
+    if pd.isna(last['macd']) or pd.isna(last['macd_signal']) or pd.isna(last['macd_hist']) or pd.isna(last['rsi_30']) or pd.isna(last['ema200']):
+        return False, None, None, None, None
     
     macd_above_signal = last['macd'] > last['macd_signal']
     hist_positive = last['macd_hist'] > 0
@@ -260,9 +283,9 @@ def check_stage2_conditions(df):
             'macd': last['macd'],
             'macd_signal': last['macd_signal'],
             'macd_hist': last['macd_hist']
-        }
+        }, last['ema200']
     
-    return False, None, None, None
+    return False, None, None, None, None
 
 # ================= FORMATTING =================
 def fmt_3(value):
@@ -270,6 +293,25 @@ def fmt_3(value):
         return "N/A"
     try:
         return f"{float(value):.3f}"
+    except:
+        return "N/A"
+
+def fmt_percent(value):
+    """Format risk as percentage with color coding"""
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return "N/A"
+    try:
+        pct = float(value) * 100
+        if pct < 0:
+            return f"<b><font color=\"#4CAF50\">{pct:.1f}%</font></b>"  # سبز برای زیر میانگین
+        elif pct < 5:
+            return f"<b><font color=\"#8BC34A\">+{pct:.1f}%</font></b>"  # سبز روشن
+        elif pct < 10:
+            return f"<b><font color=\"#FFC107\">+{pct:.1f}%</font></b>"  # زرد
+        elif pct < 20:
+            return f"<b><font color=\"#FF9800\">+{pct:.1f}%</font></b>"  # نارنجی
+        else:
+            return f"<b><font color=\"#F44336\">+{pct:.1f}%</font></b>"  # قرمز برای ریسک بالا
     except:
         return "N/A"
 
@@ -365,7 +407,7 @@ def build_batch_message(signals, stage_info=None):
 # ================= STAGE 2: FORMATTING =================
 def build_stage2_card(rank, sig):
     """
-    Build signal card for Stage 2 (30m MACD+RSI) results
+    Build signal card for Stage 2 (30m MACD+RSI) results with Risk parameter
     """
     rsi_val = sig['rsi']
     if rsi_val < 60:
@@ -382,6 +424,10 @@ def build_stage2_card(rank, sig):
     macd_hist = sig.get('macd_hist', 0) or 0
     macd_status = "🟢 مثبت" if macd_hist > 0 else "🔴 منفی"
     
+    # ✅ Risk Parameter Display
+    risk_val = sig.get('risk', 0) or 0
+    risk_display = fmt_percent(risk_val)
+    
     card = (
         f"┌─ {rank}. {rsi_emoji} <b>{escape(sig['symbol'])}</b> {type_badge}\n"
         f"│\n"
@@ -390,6 +436,7 @@ def build_stage2_card(rank, sig):
         f"│  📈 MACD: <code>{fmt_3(sig['macd'])}</code>\n"
         f"│  📉 Signal: <code>{fmt_3(sig['macd_signal'])}</code>\n"
         f"│  📊 Histogram: <code>{fmt_3(macd_hist)}</code> │ {macd_status}\n"
+        f"│  ⚠️ Risk: {risk_display} │ فاصله از EMA200\n"
         f"│  {mc}\n"
         f"└─────────────────────────────\n"
     )
@@ -397,7 +444,7 @@ def build_stage2_card(rank, sig):
 
 def build_stage2_message(signals, stage1_count, stage2_count):
     """
-    Build final message for Stage 2 results
+    Build final message for Stage 2 results with Risk sorting info
     """
     now_tehran = datetime.now(pytz.timezone('Asia/Tehran'))
     tehran_time = jdatetime.datetime.fromgregorian(datetime=now_tehran).strftime('%Y/%m/%d %H:%M:%S')
@@ -408,7 +455,8 @@ def build_stage2_message(signals, stage1_count, stage2_count):
         f"📋 <b>فیلترهای اعمال شده:</b>\n"
         f"├─ 📊 MACD(36,78,30): خط MACD > Signal\n"
         f"├─ 📈 Histogram MACD > 0 (مثبت)\n"
-        f"└─ 💪 RSI(30) > 50\n"
+        f"├─ 💪 RSI(30) > 50\n"
+        f"└─ ⚠️ Risk: سورت از کم‌ریسک به پرریسک (فاصله از EMA200)\n"
         f"\n📈 <b>آمار نهایی:</b>\n"
         f"├─ اسکن 1 (روزانه): <code>{stage1_count:4d}</code> نماد\n"
         f"├─ اسکن 2 (ساعتی): <code>{stage2_count:4d}</code> نماد\n"
@@ -419,7 +467,7 @@ def build_stage2_message(signals, stage1_count, stage2_count):
     footer = (
         f"\n⏰ بروزرسانی: <b>{tehran_time}</b> 🇮🇷 تهران\n"
         f"⚠️ <i>این گزارش صرفاً تحلیلی است و توصیه مالی محسوب نمی‌شود.</i>\n"
-        f"🤖 <code>AlphaScanner v2.2 - Stage 2</code>"
+        f"🤖 <code>AlphaScanner v2.3 - Risk Sort</code>"
     )
     
     messages = []
@@ -486,6 +534,7 @@ def scan_stage(symbols_to_scan, timeframe, limit, check_func, stage_name, calc_s
 def scan_stage2(symbols_to_scan, stage_name="🔍 اسکن نهایی (30m)"):
     """
     Scan Stage 2: MACD(36,78,30) + RSI(30) on 30m timeframe
+    ✅ با محاسبه پارامتر Risk و سورت نهایی
     """
     signals = []
     total = len(symbols_to_scan)
@@ -498,9 +547,12 @@ def scan_stage2(symbols_to_scan, stage_name="🔍 اسکن نهایی (30m)"):
                 continue
             
             df = calculate_macd_rsi(df)
-            ok, price, rsi, macd_data = check_stage2_conditions(df)
+            ok, price, rsi, macd_data, ema200 = check_stage2_conditions(df)
             
-            if ok:
+            if ok and ema200 is not None and ema200 > 0:
+                # ✅ Calculate Risk: (Price - EMA200) / EMA200
+                risk = (price - ema200) / ema200
+                
                 market_type = 'F' if (info.get('future', False) or info.get('swap', False)) else 'S'
                 signals.append({
                     'symbol': symbol,
@@ -509,6 +561,8 @@ def scan_stage2(symbols_to_scan, stage_name="🔍 اسکن نهایی (30m)"):
                     'macd': macd_data['macd'],
                     'macd_signal': macd_data['macd_signal'],
                     'macd_hist': macd_data['macd_hist'],
+                    'ema200': ema200,
+                    'risk': risk,  # ✅ Add Risk parameter
                     'market_cap': get_market_cap(symbol),
                     'market_type': market_type,
                     'info': info
@@ -529,8 +583,10 @@ def scan_stage2(symbols_to_scan, stage_name="🔍 اسکن نهایی (30m)"):
 def run():
     print("🚀 شروع اسکن سه مرحله‌ای (روزانه ← ساعتی ← 30m)...")
     load_market_caps()
+    
+    # ✅ Get filtered pairs with deduplication (spot preferred over futures)
     all_pairs = get_filtered_pairs()
-    print(f"📊 کل نمادهای فعال برای اسکن: {len(all_pairs)}")
+    print(f"📊 کل نمادهای فعال برای اسکن (بدون تکرار): {len(all_pairs)}")
     
     # Stage 1: Daily filter
     daily_signals = scan_stage(
@@ -602,7 +658,9 @@ def run():
         print(f"✅ {stage2_count} ارز از اسکن نهایی عبور کردند.")
         
         if stage2_signals:
-            stage2_sorted = sorted(stage2_signals, key=lambda x: x['rsi'], reverse=True)
+            # ✅ Sort by Risk (ascending): lowest risk first (closest to EMA200)
+            stage2_sorted = sorted(stage2_signals, key=lambda x: x['risk'] if x['risk'] is not None else 999)
+            
             messages = build_stage2_message(stage2_sorted, daily_count, hourly_count)
             print(f"📤 در حال ارسال {len(messages)} پیام نهایی ({stage2_count} سیگنال)...")
             for msg in messages:
