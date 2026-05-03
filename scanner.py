@@ -34,7 +34,7 @@ MACD_FAST = 36
 MACD_SLOW = 78
 MACD_SIGNAL = 30
 RSI_LENGTH = 30
-
+STAGE2_MIN_REQUIRED_BARS = 150  # حداقل کندل برای اسکن 30 دقیقه (کمتر از 210)
 # ================= ENV & SECURITY FIXES =================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 if not TELEGRAM_BOT_TOKEN:
@@ -171,10 +171,12 @@ def get_filtered_pairs():
     return [(sym, inf) for sym, inf, _ in symbol_map.values()]
 
 # ================= DATA =================
-def fetch_ohlcv(symbol, timeframe, limit):
+def fetch_ohlcv(symbol, timeframe, limit, min_bars=None):
     try:
         data = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-        if len(data) < MIN_REQUIRED_BARS:
+        # اگر min_bars داده نشد، از مقدار پیش‌فرض استفاده کن
+        threshold = min_bars if min_bars is not None else MIN_REQUIRED_BARS
+        if len(data) < threshold:
             return None
         df = pd.DataFrame(data, columns=['ts', 'o', 'h', 'l', 'c', 'v'])
         df['ts'] = pd.to_datetime(df['ts'], unit='ms', utc=True)
@@ -542,7 +544,7 @@ def scan_stage2(symbols_to_scan, stage_name="🔍 اسکن نهایی (30m)"):
     
     for idx, (symbol, info) in enumerate(tqdm(symbols_to_scan, desc=stage_name, total=total), 1):
         try:
-            df = fetch_ohlcv(symbol, timeframe=STAGE2_TIMEFRAME, limit=STAGE2_LIMIT)
+            df = fetch_ohlcv(symbol, timeframe=STAGE2_TIMEFRAME, limit=STAGE2_LIMIT, min_bars=STAGE2_MIN_REQUIRED_BARS)
             if df is None:
                 continue
             
