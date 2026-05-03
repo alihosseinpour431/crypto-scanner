@@ -1,5 +1,7 @@
 # scanner.py
-# ✅ نسخه نهایی بهینه‌شده برای GitHub Actions - اسکن ۳ مرحله‌ای + Risk Sort + Deduplication
+# ✅ نسخه نهایی بهینه‌شده برای GitHub Actions - منطق دو مستطیل
+# مستطیل ۱: فیلتر ترکیبی روزانه + ساعتی + محاسبه Alpha
+# مستطیل ۲: فیلتر ۳۰ دقیقه + محاسبه Risk% + سورت صعودی
 
 import os
 import time
@@ -18,24 +20,21 @@ EXCHANGE_ID = 'xt'
 SCAN_SPOT = True
 SCAN_FUTURES = True
 
-DAILY_TIMEFRAME = '1d'
+# تایم‌فریم‌ها و حداقل کندل
+DAILY_TF = '1d'
 DAILY_LIMIT = 230
-HOURLY_TIMEFRAME = '1h'
+HOURLY_TF = '1h'
 HOURLY_LIMIT = 300
-MIN_REQUIRED_BARS = 210
+TF_30M = '30m'
+LIMIT_30M = 250
+MIN_BARS_REQUIRED = 200
+
+# پارامترهای اندیکاتور
+RSI_LENGTH = 30
 ALPHA_SHORT = 3
 ALPHA_LONG = 10
 
-# ================= STAGE 2 (MACD+RSI) CONFIG =================
-STAGE2_TIMEFRAME = '30m'
-STAGE2_LIMIT = 300
-STAGE2_MIN_BARS = 200
-MACD_FAST = 36
-MACD_SLOW = 78
-MACD_SIGNAL = 30
-RSI_LENGTH = 30
-STAGE2_MIN_REQUIRED_BARS = 150  # حداقل کندل برای اسکن 30 دقیقه (کمتر از 210)
-# ================= ENV & SECURITY FIXES =================
+# ================= ENV & SECURITY =================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 if not TELEGRAM_BOT_TOKEN:
     raise ValueError("❌ TELEGRAM_BOT_TOKEN is not set in environment variables!")
@@ -57,7 +56,6 @@ except Exception as e:
 
 # ================= CACHE =================
 market_cap_cache = {}
-symbol_type_cache = {}
 
 # ================= TELEGRAM =================
 def send_telegram_message(text, chat_id=None):
@@ -70,621 +68,284 @@ def send_telegram_message(text, chat_id=None):
             'chat_id': cid,
             'text': text,
             'parse_mode': 'HTML',
-            'disable_web_page_preview': True,
-            'disable_notification': False
+            'disable_web_page_preview': True
         }
         try:
             r = requests.post(url, json=payload, timeout=30)
             if DEBUG_MODE and r.status_code != 200:
-                print(f"⚠️ Telegram ({cid}): {r.status_code} | {r.text}")
+                print(f"⚠️ Telegram ({cid}): {r.status_code} | {r.text[:100]}")
         except Exception as e:
             print(f"❌ Telegram Error ({cid}): {e}")
 
-# ================= COINGECKO MARKET CAP =================
+# ================= COINGECKO =================
 def load_market_caps():
-    if market_cap_cache:
-        return
+    if market_cap_cache: return
     print("📥 Loading Market Cap from CoinGecko ...")
     session = requests.Session()
-    for page in range(1, 21):
+    for page in range(1, 11):
         try:
             url = f"{COINGECKO_API}/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=250&page={page}&sparkline=false"
             r = session.get(url, timeout=20)
             data = r.json()
-            if not isinstance(data, list) or len(data) == 0:
-                break
+            if not isinstance(data, list) or len(data) == 0: break
             for coin in data:
                 sym = str(coin.get('symbol', '')).upper().strip()
                 mc = coin.get('market_cap')
-                if not sym or not isinstance(mc, (int, float)):
-                    continue
-                prev = market_cap_cache.get(sym)
-                if prev is None or mc > prev:
+                if sym and isinstance(mc, (int, float)):
                     market_cap_cache[sym] = mc
-            if len(data) < 250:
-                break
-            time.sleep(0.15)
-        except Exception as e:
-            if DEBUG_MODE:
-                print(f"⚠️ Error in load_market_caps page={page}: {e}")
-            break
+            if len(data) < 250: break
+            time.sleep(0.1)
+        except: break
     print(f"✅ Market Cap loaded: {len(market_cap_cache)} symbols")
 
 def get_market_cap(symbol):
-    base_symbol = symbol.split('/')[0].upper().strip()
-    return market_cap_cache.get(base_symbol)
+    base = symbol.split('/')[0].upper()
+    return market_cap_cache.get(base)
 
-def format_market_cap(value):
-    if value is None or (isinstance(value, float) and np.isnan(value)):
-        return "🔸 N/A"
-    try:
-        value = float(value)
-    except:
-        return "🔸 N/A"
-    if value >= 1e12: return f"💎 <b>${value/1e12:.2f}T</b>"
-    if value >= 1e9: return f"💎 <b>${value/1e9:.2f}B</b>"
-    if value >= 1e6: return f"💎 <b>${value/1e6:.2f}M</b>"
-    if value >= 1e3: return f"💎 <b>${value/1e3:.2f}K</b>"
-    return f"💎 <b>${value:,.0f}</b>"
+def fmt_mc(value):
+    if value is None or np.isnan(value): return "🔸 N/A"
+    v = float(value)
+    if v >= 1e12: return f"💎 ${v/1e12:.2f}T"
+    if v >= 1e9: return f"💎 ${v/1e9:.2f}B"
+    if v >= 1e6: return f"💎 ${v/1e6:.2f}M"
+    return f"💎 ${v:,.0f}"
 
-# ================= MARKET =================
-def get_symbol_type(symbol):
-    if symbol in symbol_type_cache:
-        return symbol_type_cache[symbol]
-    try:
-        info = exchange_markets.get(symbol, {})
-        is_future = info.get('future', False) or info.get('swap', False)
-        result = 'F' if is_future else 'S'
-        symbol_type_cache[symbol] = result
-        return result
-    except:
-        return 'S'
-
+# ================= DEDUPLICATION =================
 def get_filtered_pairs():
-    """
-    ✅ دریافت جفت‌ارزها با حذف نمادهای تکراری
-    اولویت: اسپات > فیوچرز (اگر ارزی هم اسپات باشد هم فیوچرز، فقط اسپات را نگه می‌داریم)
-    """
-    symbol_map = {}  # base_symbol -> (symbol, info, is_spot)
-    
+    symbol_map = {}
     for symbol, info in exchange_markets.items():
-        if not info.get('active'): 
-            continue
-        if info.get('quote') != 'USDT': 
-            continue
-        
+        if not info.get('active') or info.get('quote') != 'USDT': continue
         is_spot = info.get('spot', False)
         is_future = info.get('future', False) or info.get('swap', False)
-        
         if (SCAN_SPOT and is_spot) or (SCAN_FUTURES and is_future):
-            base = symbol.split('/')[0].upper().strip()
-            
+            base = symbol.split('/')[0].upper()
             if base not in symbol_map:
-                # اولین بار: ذخیره کن
                 symbol_map[base] = (symbol, info, is_spot)
             elif is_spot and not symbol_map[base][2]:
-                # اگر الان اسپات پیدا شد و قبلی فیوچرز بود، جایگزین کن (اولویت با اسپات)
                 symbol_map[base] = (symbol, info, True)
-            # در غیر این صورت: قبلاً اسپات بوده، فیوچرز جدید را نادیده بگیر
-    
-    # برگرداندن لیست نهایی به فرمت (symbol, info)
     return [(sym, inf) for sym, inf, _ in symbol_map.values()]
 
-# ================= DATA =================
-def fetch_ohlcv(symbol, timeframe, limit, min_bars=None):
+# ================= DATA & INDICATORS =================
+def fetch_ohlcv(symbol, timeframe, limit):
     try:
         data = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-        # اگر min_bars داده نشد، از مقدار پیش‌فرض استفاده کن
-        threshold = min_bars if min_bars is not None else MIN_REQUIRED_BARS
-        if len(data) < threshold:
-            return None
+        if len(data) < MIN_BARS_REQUIRED: return None
         df = pd.DataFrame(data, columns=['ts', 'o', 'h', 'l', 'c', 'v'])
         df['ts'] = pd.to_datetime(df['ts'], unit='ms', utc=True)
         return df
     except Exception as e:
-        if DEBUG_MODE:
-            print(f"⚠️ Fetch error {symbol}: {e}")
+        if DEBUG_MODE: print(f"⚠️ Fetch error {symbol}: {e}")
         return None
 
-# ================= INDICATORS =================
-def calculate(df, short_win=ALPHA_SHORT, long_win=ALPHA_LONG):
+def calc_indicators(df):
+    """محاسبه EMAها، RSI(30)، OBV و Alphaهای حجم و OBV"""
     df = df.copy()
     df['ema30'] = df['c'].ewm(span=30, adjust=False).mean()
     df['ema50'] = df['c'].ewm(span=50, adjust=False).mean()
     df['ema200'] = df['c'].ewm(span=200, adjust=False).mean()
     
     delta = df['c'].diff()
-    gain = delta.where(delta > 0, 0).rolling(30).mean()
-    loss = -delta.where(delta < 0, 0).rolling(30).mean()
+    gain = delta.where(delta > 0, 0).rolling(RSI_LENGTH).mean()
+    loss = -delta.where(delta < 0, 0).rolling(RSI_LENGTH).mean()
     rs = gain / loss.replace(0, np.nan)
     df['rsi'] = 100 - (100 / (1 + rs))
     
-    vol_short = df['v'].rolling(short_win).mean()
-    vol_long = df['v'].rolling(long_win).mean()
-    df['alpha'] = vol_short / vol_long.replace(0, np.nan)
+    direction = np.sign(df['c'].diff()).fillna(0)
+    df['obv'] = (direction * df['v']).cumsum()
     
-    diff_close = df['c'].diff()
-    direction = np.where(diff_close > 0, 1, np.where(diff_close < 0, -1, 0))
-    df['obv'] = (pd.Series(direction, index=df.index) * df['v']).cumsum()
-    obv_short = df['obv'].rolling(short_win).mean()
-    obv_long = df['obv'].rolling(long_win).mean()
-    df['obv_alpha'] = obv_short / obv_long.replace(0, np.nan)
+    df['vol_alpha'] = df['v'].rolling(ALPHA_SHORT).mean() / df['v'].rolling(ALPHA_LONG).mean()
+    df['obv_alpha'] = df['obv'].rolling(ALPHA_SHORT).mean() / df['obv'].rolling(ALPHA_LONG).mean()
     return df
 
-# ================= STAGE 2: MACD + RSI + EMA200 CALCULATION =================
-def calculate_macd_rsi(df, fast=MACD_FAST, slow=MACD_SLOW, signal_len=MACD_SIGNAL, rsi_len=RSI_LENGTH):
-    """
-    Calculate MACD (custom: 36,78,30), RSI (30) and EMA200 for Risk calculation
-    """
-    df = df.copy()
+# ================= SCAN RECTANGLE 1 =================
+def scan_rectangle1(pairs):
+    results = []
+    total = len(pairs)
+    print(f"🔲 شروع مستطیل ۱: {total} نماد")
     
-    # EMA200 for Risk calculation
-    df['ema200'] = df['c'].ewm(span=200, adjust=False).mean()
-    
-    # MACD Calculation
-    ema_fast = df['c'].ewm(span=fast, adjust=False).mean()
-    ema_slow = df['c'].ewm(span=slow, adjust=False).mean()
-    df['macd'] = ema_fast - ema_slow
-    df['macd_signal'] = df['macd'].ewm(span=signal_len, adjust=False).mean()
-    df['macd_hist'] = df['macd'] - df['macd_signal']
-    
-    # RSI Calculation (Length 30)
-    delta = df['c'].diff()
-    gain = delta.where(delta > 0, 0).rolling(rsi_len).mean()
-    loss = -delta.where(delta < 0, 0).rolling(rsi_len).mean()
-    rs = gain / loss.replace(0, np.nan)
-    df['rsi_30'] = 100 - (100 / (1 + rs))
-    
-    return df
+    for idx, (symbol, info) in enumerate(tqdm(pairs, desc="Rect1", total=total), 1):
+        try:
+            # ۱. فیلتر روزانه
+            df_d = fetch_ohlcv(symbol, DAILY_TF, DAILY_LIMIT)
+            if df_d is None: continue
+            df_d = calc_indicators(df_d)
+            last_d = df_d.iloc[-1]
+            daily_ok = (
+                pd.notna(last_d['c']) and pd.notna(last_d['ema30']) and pd.notna(last_d['ema50']) and pd.notna(last_d['rsi']) and
+                last_d['c'] > last_d['ema30'] > last_d['ema50'] and last_d['rsi'] > 50
+            )
+            if not daily_ok: continue
+            
+            # ۲. فیلتر ساعتی (فقط اگر روزانه پاس شد)
+            df_h = fetch_ohlcv(symbol, HOURLY_TF, HOURLY_LIMIT)
+            if df_h is None: continue
+            df_h = calc_indicators(df_h)
+            last_h = df_h.iloc[-1]
+            hourly_ok = (
+                pd.notna(last_h['c']) and pd.notna(last_h['ema50']) and pd.notna(last_h['ema200']) and pd.notna(last_h['rsi']) and
+                last_h['c'] > last_h['ema50'] > last_h['ema200'] and last_h['rsi'] > 50
+            )
+            if not hourly_ok: continue
+            
+            # ✅ هر دو فیلتر پاس شدند
+            mkt = 'F' if (info.get('future') or info.get('swap')) else 'S'
+            results.append({
+                'symbol': symbol,
+                'price': last_h['c'],
+                'rsi': last_h['rsi'],
+                'vol_alpha': last_h['vol_alpha'],
+                'obv_alpha': last_h['obv_alpha'],
+                'mc': get_market_cap(symbol),
+                'mkt_type': mkt,
+                'info': info
+            })
+        except Exception as e:
+            if DEBUG_MODE: print(f"⚠️ Rect1 {symbol}: {e}")
+        time.sleep(0.02)
+    return results
 
-# ================= SIGNAL CHECKERS =================
-def check_daily(df):
-    last = df.iloc[-1]
-    if pd.isna(last['ema30']) or pd.isna(last['ema50']) or pd.isna(last['rsi']):
-        return False, None, None
-    cond_price = last['c'] > last['ema30']
-    cond_ema = last['ema30'] > last['ema50']
-    cond_rsi = last['rsi'] > 50
-    if cond_price and cond_ema and cond_rsi:
-        return True, last['c'], last['rsi']
-    return False, None, None
-
-def check_hourly(df):
-    last = df.iloc[-1]
-    if pd.isna(last['ema50']) or pd.isna(last['ema200']) or pd.isna(last['rsi']):
-        return False, None, None
-    cond_price = last['c'] > last['ema50']
-    cond_ema = last['ema50'] > last['ema200']
-    cond_rsi = last['rsi'] > 50
-    if cond_price and cond_ema and cond_rsi:
-        return True, last['c'], last['rsi']
-    return False, None, None
-
-def check_stage2_conditions(df):
-    """
-    Check Stage 2 (30m) conditions:
-    1. MACD line > Signal line
-    2. MACD Histogram > 0
-    3. RSI(30) > 50
-    Returns: ok, price, rsi, macd_data, ema200
-    """
-    if len(df) < STAGE2_MIN_BARS:
-        return False, None, None, None, None
+# ================= SCAN RECTANGLE 2 =================
+def scan_rectangle2(rect1_results):
+    results = []
+    total = len(rect1_results)
+    print(f"🔲 شروع مستطیل ۲: {total} نماد")
     
-    last = df.iloc[-1]
+    for idx, sig in enumerate(tqdm(rect1_results, desc="Rect2", total=total), 1):
+        symbol = sig['symbol']
+        info = sig['info']
+        try:
+            df = fetch_ohlcv(symbol, TF_30M, LIMIT_30M)
+            if df is None: continue
+            df = calc_indicators(df)
+            last = df.iloc[-1]
+            
+            # فیلتر ۳۰ دقیقه
+            cond = (
+                pd.notna(last['c']) and pd.notna(last['ema30']) and pd.notna(last['ema50']) and 
+                pd.notna(last['ema200']) and pd.notna(last['rsi']) and
+                last['c'] > last['ema30'] > last['ema50'] > last['ema200'] and
+                last['rsi'] > 50
+            )
+            if not cond: continue
+            
+            # محاسبه Risk%
+            risk_pct = ((last['c'] - last['ema200']) / last['ema200']) * 100
+            
+            results.append({
+                'symbol': symbol,
+                'price': last['c'],
+                'rsi': last['rsi'],
+                'ema200': last['ema200'],
+                'risk': risk_pct,
+                'mc': get_market_cap(symbol),
+                'mkt_type': sig['mkt_type']
+            })
+        except Exception as e:
+            if DEBUG_MODE: print(f"⚠️ Rect2 {symbol}: {e}")
+        time.sleep(0.02)
     
-    if pd.isna(last['macd']) or pd.isna(last['macd_signal']) or pd.isna(last['macd_hist']) or pd.isna(last['rsi_30']) or pd.isna(last['ema200']):
-        return False, None, None, None, None
-    
-    macd_above_signal = last['macd'] > last['macd_signal']
-    hist_positive = last['macd_hist'] > 0
-    rsi_above_50 = last['rsi_30'] > 50
-    
-    if macd_above_signal and hist_positive and rsi_above_50:
-        return True, last['c'], last['rsi_30'], {
-            'macd': last['macd'],
-            'macd_signal': last['macd_signal'],
-            'macd_hist': last['macd_hist']
-        }, last['ema200']
-    
-    return False, None, None, None, None
+    # ✅ سورت صعودی بر اساس Risk% (کم‌ریسک اول)
+    results.sort(key=lambda x: x['risk'] if x['risk'] is not None else 999)
+    return results
 
-# ================= FORMATTING =================
-def fmt_3(value):
-    if value is None or (isinstance(value, float) and np.isnan(value)):
-        return "N/A"
-    try:
-        return f"{float(value):.3f}"
-    except:
-        return "N/A"
-
-def fmt_percent(value):
-    """Format risk as percentage with color coding"""
-    if value is None or (isinstance(value, float) and np.isnan(value)):
-        return "N/A"
-    try:
-        pct = float(value) * 100
-        if pct < 0:
-            return f"<b><font color=\"#4CAF50\">{pct:.1f}%</font></b>"  # سبز برای زیر میانگین
-        elif pct < 5:
-            return f"<b><font color=\"#8BC34A\">+{pct:.1f}%</font></b>"  # سبز روشن
-        elif pct < 10:
-            return f"<b><font color=\"#FFC107\">+{pct:.1f}%</font></b>"  # زرد
-        elif pct < 20:
-            return f"<b><font color=\"#FF9800\">+{pct:.1f}%</font></b>"  # نارنجی
-        else:
-            return f"<b><font color=\"#F44336\">+{pct:.1f}%</font></b>"  # قرمز برای ریسک بالا
-    except:
-        return "N/A"
-
-def get_rsi_badge(rsi):
-    if rsi < 55: return "🟢", "ورود اولیه", "#4CAF50"
-    elif rsi < 65: return "🔵", "روند پایدار", "#2196F3"
-    elif rsi < 75: return "🟡", "نزدیک اشباع", "#FFC107"
-    else: return "🔴", "اشباع خرید", "#F44336"
-
-def build_signal_card(rank, sig):
-    emoji, rsi_txt, _ = get_rsi_badge(sig['rsi'])
-    type_badge = "🅂 <i>Spot</i>" if sig['market_type'] == 'S' else "🄵 <i>Futures</i>"
-    mc = format_market_cap(sig.get('market_cap'))
-    alpha_val = sig.get('alpha', 0) or 0
-    obv_val = sig.get('obv_alpha', 0) or 0
-    
-    if alpha_val > 1.2 and obv_val > 1.1: signal_strength = "🔥 <b>قوی</b>"
-    elif alpha_val > 1.0: signal_strength = "⚡ <b>متوسط</b>"
-    else: signal_strength = "🔸 <i>ضعیف</i>"
-    
-    is_hot = alpha_val > 1.0
-    hot_banner = ""
-    if is_hot:
-        hot_banner = f"🔥 <b>Vα فعال:</b> <code>{fmt_3(alpha_val)}</code> │ حجم در حال ورود 📈\n"
-    alpha_display = (
-        f"⚡ Vα: <b><code>{fmt_3(alpha_val)}</code></b> 🔺" if is_hot
-        else f"⚡ Vα: <code>{fmt_3(alpha_val)}</code>"
-    )
-    card = (
-        f"{hot_banner}"
-        f"┌─ {rank}. {emoji} <b>{escape(sig['symbol'])}</b> {type_badge}\n"
-        f"│\n"
-        f"│  💰 قیمت: <code>{sig['price']:,.4f} USDT</code>\n"
-        f"│  📊 RSI(1h): <code>{sig['rsi']:5.1f}</code> │ <i>{rsi_txt}</i>\n"
-        f"│  {alpha_display}\n"
-        f"│  📦 OBVα: <code>{fmt_3(obv_val)}</code>\n"
-        f"│  🎯 قدرت: {signal_strength}\n"
-        f"│  {mc}\n"
-        f"└─────────────────────────────\n"
-    )
-    return card
-
-def build_batch_message(signals, stage_info=None):
-    now_tehran = datetime.now(pytz.timezone('Asia/Tehran'))
-    tehran_time = jdatetime.datetime.fromgregorian(datetime=now_tehran).strftime('%Y/%m/%d %H:%M:%S')
+# ================= MESSAGE BUILDERS =================
+def build_rect1_message(signals, total_pairs):
+    now = jdatetime.datetime.now(pytz.timezone('Asia/Tehran')).strftime('%Y/%m/%d %H:%M:%S')
     header = (
-        f"🔍 <b>گزارش اسکن هوشمند | XT Exchange</b>\n"
+        f"🔍 <b>گزارش مستطیل ۱ | فیلتر ترکیبی</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📋 <b>پارامترهای فیلتر:</b>\n"
-        f"├─ 📅 روزانه: Price>EMA30>EMA50 | RSI(30)>50\n"
-        f"├─ ⏰ ساعتی: Price>EMA50>EMA200 | RSI(30)>50\n"
-        f"└─ ⚡ Alpha: میانگین ۳ / ۱۰ دوره (حجم + OBV)\n"
-    )
-    stats_box = ""
-    if stage_info:
-        stats_box = (
-            f"\n📈 <b>آمار فیلتر دو مرحله‌ای:</b>\n"
-            f"├─ ✅ عبور از فیلتر روزانه: <code>{stage_info['daily_passed']:4d}</code> نماد\n"
-            f"└─ 🎯 عبور از فیلتر ساعتی: <code>{stage_info['hourly_passed']:4d}</code> نماد نهایی\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        )
-    footer = (
-        f"\n⏰ بروزرسانی: <b>{tehran_time}</b> 🇮🇷 تهران\n"
-        f"⚠️ <i>این گزارش صرفاً تحلیلی است و توصیه مالی محسوب نمی‌شود.</i>\n"
-        f"🤖 <code>AlphaScanner v2.1</code>"
-    )
-    messages = []
-    MAX_LEN = 4000
-    body = ""
-    for rank, sig in enumerate(signals, 1):
-        card = build_signal_card(rank, sig)
-        if len(header) + len(stats_box) + len(body) + len(card) + len(footer) > MAX_LEN - 200:
-            full_msg = header + stats_box + body + footer
-            messages.append(full_msg)
-            body = card
-            stats_box = ""
-        else:
-            body += card
-    if body.strip():
-        final_msg = header + stats_box + body + footer
-        messages.append(final_msg)
-    if not messages:
-        empty_msg = (
-            f"{header}\n"
-            f"\n❌ <b>هیچ سیگنال معتبری یافت نشد.</b>\n"
-            f"• شرایط فیلترها بسیار سخت‌گیرانه است.\n"
-            f"• پیشنهاد: پارامترها را بررسی یا تایم‌فریم را تغییر دهید.\n"
-            f"{footer}"
-        )
-        messages.append(empty_msg)
-    return messages
-
-# ================= STAGE 2: FORMATTING =================
-def build_stage2_card(rank, sig):
-    """
-    Build signal card for Stage 2 (30m MACD+RSI) results with Risk parameter
-    """
-    rsi_val = sig['rsi']
-    if rsi_val < 60:
-        rsi_emoji, rsi_txt = "🟢", "روند صعودی"
-    elif rsi_val < 70:
-        rsi_emoji, rsi_txt = "🔵", "قدرتمند"
-    elif rsi_val < 80:
-        rsi_emoji, rsi_txt = "🟡", "نزدیک اشباع"
-    else:
-        rsi_emoji, rsi_txt = "🔴", "اشباع خرید"
-    
-    type_badge = "🅂 <i>Spot</i>" if sig['market_type'] == 'S' else "🄵 <i>Futures</i>"
-    mc = format_market_cap(sig.get('market_cap'))
-    macd_hist = sig.get('macd_hist', 0) or 0
-    macd_status = "🟢 مثبت" if macd_hist > 0 else "🔴 منفی"
-    
-    # ✅ Risk Parameter Display
-    risk_val = sig.get('risk', 0) or 0
-    risk_display = fmt_percent(risk_val)
-    
-    card = (
-        f"┌─ {rank}. {rsi_emoji} <b>{escape(sig['symbol'])}</b> {type_badge}\n"
-        f"│\n"
-        f"│  💰 قیمت: <code>{sig['price']:,.4f} USDT</code>\n"
-        f"│  📊 RSI(30): <code>{rsi_val:5.1f}</code> │ <i>{rsi_txt}</i>\n"
-        f"│  📈 MACD: <code>{fmt_3(sig['macd'])}</code>\n"
-        f"│  📉 Signal: <code>{fmt_3(sig['macd_signal'])}</code>\n"
-        f"│  📊 Histogram: <code>{fmt_3(macd_hist)}</code> │ {macd_status}\n"
-        f"│  ⚠️ Risk: {risk_display} │ فاصله از EMA200\n"
-        f"│  {mc}\n"
-        f"└─────────────────────────────\n"
-    )
-    return card
-
-def build_stage2_message(signals, stage1_count, stage2_count):
-    """
-    Build final message for Stage 2 results with Risk sorting info
-    """
-    now_tehran = datetime.now(pytz.timezone('Asia/Tehran'))
-    tehran_time = jdatetime.datetime.fromgregorian(datetime=now_tehran).strftime('%Y/%m/%d %H:%M:%S')
-    
-    header = (
-        f"🎯 <b>اسکن نهایی | تایم‌فریم 30 دقیقه</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📋 <b>فیلترهای اعمال شده:</b>\n"
-        f"├─ 📊 MACD(36,78,30): خط MACD > Signal\n"
-        f"├─ 📈 Histogram MACD > 0 (مثبت)\n"
-        f"├─ 💪 RSI(30) > 50\n"
-        f"└─ ⚠️ Risk: سورت از کم‌ریسک به پرریسک (فاصله از EMA200)\n"
-        f"\n📈 <b>آمار نهایی:</b>\n"
-        f"├─ اسکن 1 (روزانه): <code>{stage1_count:4d}</code> نماد\n"
-        f"├─ اسکن 2 (ساعتی): <code>{stage2_count:4d}</code> نماد\n"
-        f"└─ ✅ نهایی (30m): <code>{len(signals):4d}</code> نماد\n"
+        f"📊 نمادهای بررسی شده: <code>{total_pairs}</code>\n"
+        f"✅ عبور کرده: <code>{len(signals)}</code>\n"
+        f"📋 شرایط:\n"
+        f" ├─ روزانه: Price>EMA30>EMA50 | RSI>50\n"
+        f" └─ ساعتی: Price>EMA50>EMA200 | RSI>50\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
     )
+    footer = f"\n⏰ {now} 🇮🇷\n🤖 AlphaScanner v2.0"
     
-    footer = (
-        f"\n⏰ بروزرسانی: <b>{tehran_time}</b> 🇮🇷 تهران\n"
-        f"⚠️ <i>این گزارش صرفاً تحلیلی است و توصیه مالی محسوب نمی‌شود.</i>\n"
-        f"🤖 <code>AlphaScanner v2.3 - Risk Sort</code>"
-    )
-    
-    messages = []
-    MAX_LEN = 4000
+    msgs = []
     body = ""
-    
-    for rank, sig in enumerate(signals, 1):
-        card = build_stage2_card(rank, sig)
-        if len(header) + len(body) + len(card) + len(footer) > MAX_LEN - 200:
-            full_msg = header + body + footer
-            messages.append(full_msg)
+    MAX = 4000
+    for r, s in enumerate(signals, 1):
+        card = (
+            f"{r}. {escape(s['symbol'])} [{s['mkt_type']}]\n"
+            f"💰 {s['price']:,.4f} USDT\n"
+            f"📊 RSI: {s['rsi']:.1f}\n"
+            f"⚡ Vα: {s['vol_alpha']:.3f} | OBVα: {s['obv_alpha']:.3f}\n"
+            f"💎 MC: {fmt_mc(s['mc'])}\n"
+            f"─────────────────────\n"
+        )
+        if len(header) + len(body) + len(card) + len(footer) > MAX - 100:
+            msgs.append(header + body + footer)
             body = card
         else:
             body += card
+    if body.strip(): msgs.append(header + body + footer)
+    if not msgs: msgs.append(f"{header}❌ هیچ نمادی از مستطیل ۱ عبور نکرد.{footer}")
+    return msgs
+
+def build_rect2_message(signals, rect1_count):
+    now = jdatetime.datetime.now(pytz.timezone('Asia/Tehran')).strftime('%Y/%m/%d %H:%M:%S')
+    header = (
+        f"🎯 <b>گزارش مستطیل ۲ | فیلتر نهایی 30m</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📥 ورودی از مستطیل ۱: <code>{rect1_count}</code>\n"
+        f"✅ نهایی شده: <code>{len(signals)}</code>\n"
+        f"📋 شرایط 30m: Price>EMA30>EMA50>EMA200 | RSI>50\n"
+        f"🔽 مرتب شده بر اساس Risk% (کم به زیاد)\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    )
+    footer = f"\n⏰ {now} 🇮🇷\n🤖 AlphaScanner v2.0"
     
-    if body.strip():
-        final_msg = header + body + footer
-        messages.append(final_msg)
-    
-    if not messages:
-        empty_msg = (
-            f"{header}\n"
-            f"❌ <b>هیچ ارزی شرایط نهایی را نداشت.</b>\n"
-            f"• MACD(36,78,30) باید مثبت باشد و خط MACD بالای Signal\n"
-            f"• RSI(30) باید بالای 50 باشد\n"
-            f"{footer}"
+    msgs = []
+    body = ""
+    MAX = 4000
+    for r, s in enumerate(signals, 1):
+        card = (
+            f"{r}. {escape(s['symbol'])} [{s['mkt_type']}]\n"
+            f"💰 {s['price']:,.4f} | 🎯 EMA200: {s['ema200']:,.4f}\n"
+            f"📊 RSI: {s['rsi']:.1f}\n"
+            f"⚠️ Risk: {s['risk']:+.2f}%\n"
+            f"💎 MC: {fmt_mc(s['mc'])}\n"
+            f"─────────────────────\n"
         )
-        messages.append(empty_msg)
-    
-    return messages
-
-# ================= SCAN STAGE =================
-def scan_stage(symbols_to_scan, timeframe, limit, check_func, stage_name, calc_short=ALPHA_SHORT, calc_long=ALPHA_LONG):
-    signals = []
-    total = len(symbols_to_scan)
-    print(f"🔍 شروع {stage_name}: {total} نماد برای بررسی")
-    for idx, (symbol, info) in enumerate(tqdm(symbols_to_scan, desc=stage_name, total=total), 1):
-        try:
-            df = fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-            if df is None:
-                continue
-            df = calculate(df, short_win=calc_short, long_win=calc_long)
-            ok, price, rsi = check_func(df)
-            if ok:
-                market_type = 'F' if (info.get('future', False) or info.get('swap', False)) else 'S'
-                signals.append({
-                    'symbol': symbol,
-                    'price': price,
-                    'rsi': rsi,
-                    'alpha': df.iloc[-1]['alpha'],
-                    'obv_alpha': df.iloc[-1]['obv_alpha'],
-                    'market_cap': get_market_cap(symbol),
-                    'market_type': market_type,
-                    'info': info
-                })
-        except Exception as e:
-            if DEBUG_MODE:
-                print(f"⚠️ {idx}/{total} {symbol}: {e}")
-        if idx % 50 == 0 or idx == total:
-            print(f"✅ {stage_name}: {idx}/{total} بررسی شد | سیگنال‌ها: {len(signals)}")
-        time.sleep(0.02)
-    return signals
-
-def scan_stage2(symbols_to_scan, stage_name="🔍 اسکن نهایی (30m)"):
-    """
-    Scan Stage 2: MACD(36,78,30) + RSI(30) on 30m timeframe
-    ✅ با محاسبه پارامتر Risk و سورت نهایی
-    """
-    signals = []
-    total = len(symbols_to_scan)
-    print(f"🚀 شروع {stage_name}: {total} نماد برای بررسی")
-    
-    for idx, (symbol, info) in enumerate(tqdm(symbols_to_scan, desc=stage_name, total=total), 1):
-        try:
-            df = fetch_ohlcv(symbol, timeframe=STAGE2_TIMEFRAME, limit=STAGE2_LIMIT, min_bars=STAGE2_MIN_REQUIRED_BARS)
-            if df is None:
-                continue
-            
-            df = calculate_macd_rsi(df)
-            ok, price, rsi, macd_data, ema200 = check_stage2_conditions(df)
-            
-            if ok and ema200 is not None and ema200 > 0:
-                # ✅ Calculate Risk: (Price - EMA200) / EMA200
-                risk = (price - ema200) / ema200
-                
-                market_type = 'F' if (info.get('future', False) or info.get('swap', False)) else 'S'
-                signals.append({
-                    'symbol': symbol,
-                    'price': price,
-                    'rsi': rsi,
-                    'macd': macd_data['macd'],
-                    'macd_signal': macd_data['macd_signal'],
-                    'macd_hist': macd_data['macd_hist'],
-                    'ema200': ema200,
-                    'risk': risk,  # ✅ Add Risk parameter
-                    'market_cap': get_market_cap(symbol),
-                    'market_type': market_type,
-                    'info': info
-                })
-                
-        except Exception as e:
-            if DEBUG_MODE:
-                print(f"⚠️ {idx}/{total} {symbol}: {e}")
-        
-        if idx % 50 == 0 or idx == total:
-            print(f"✅ {stage_name}: {idx}/{total} بررسی شد | سیگنال‌ها: {len(signals)}")
-        
-        time.sleep(0.02)
-    
-    return signals
+        if len(header) + len(body) + len(card) + len(footer) > MAX - 100:
+            msgs.append(header + body + footer)
+            body = card
+        else:
+            body += card
+    if body.strip(): msgs.append(header + body + footer)
+    if not msgs: msgs.append(f"{header}❌ هیچ نمادی شرایط مستطیل ۲ را نداشت.{footer}")
+    return msgs
 
 # ================= MAIN =================
 def run():
-    print("🚀 شروع اسکن سه مرحله‌ای (روزانه ← ساعتی ← 30m)...")
+    print("🚀 شروع اسکن دو مستطیلی...")
     load_market_caps()
+    pairs = get_filtered_pairs()
+    print(f"📊 کل نمادهای فعال (بدون تکرار): {len(pairs)}")
     
-    # ✅ Get filtered pairs with deduplication (spot preferred over futures)
-    all_pairs = get_filtered_pairs()
-    print(f"📊 کل نمادهای فعال برای اسکن (بدون تکرار): {len(all_pairs)}")
+    # 🔲 مستطیل ۱
+    rect1_res = scan_rectangle1(pairs)
+    print(f"✅ مستطیل ۱ پایان یافت: {len(rect1_res)} نماد")
     
-    # Stage 1: Daily filter
-    daily_signals = scan_stage(
-        symbols_to_scan=all_pairs,
-        timeframe=DAILY_TIMEFRAME,
-        limit=DAILY_LIMIT,
-        check_func=check_daily,
-        stage_name="📅 فیلتر روزانه (1d)",
-        calc_short=3,
-        calc_long=10
-    )
-    daily_count = len(daily_signals)
-    print(f"✅ {daily_count} ارز از فیلتر روزانه عبور کردند.")
-    
-    if daily_count == 0:
-        send_telegram_message(
-            f"❌ <b>سیگنالی یافت نشد</b>\n"
-            f"• هیچ ارزی از فیلتر روزانه عبور نکرد.\n"
-            f"• شرایط: قیمت>EMA30>EMA50 و RSI>50 در تایم‌فریم {DAILY_TIMEFRAME}"
-        )
-        return
-    
-    # Stage 2: Hourly filter
-    hourly_candidates = [(sig['symbol'], sig['info']) for sig in daily_signals]
-    hourly_signals = scan_stage(
-        symbols_to_scan=hourly_candidates,
-        timeframe=HOURLY_TIMEFRAME,
-        limit=HOURLY_LIMIT,
-        check_func=check_hourly,
-        stage_name="⏰ فیلتر ساعتی (1h)",
-        calc_short=3,
-        calc_long=10
-    )
-    hourly_count = len(hourly_signals)
-    print(f"✅ {hourly_count} ارز از فیلتر ساعتی نیز عبور کردند.")
-    
-    # Send Stage 1 & 2 results
-    if hourly_signals:
-        signals_sorted = sorted(hourly_signals, key=lambda x: x['rsi'])
-        stage_info = {
-            'daily_passed': daily_count,
-            'hourly_passed': hourly_count
-        }
-        messages = build_batch_message(signals_sorted, stage_info)
-        print(f"📤 در حال ارسال {len(messages)} پیام تجمیعی ({hourly_count} سیگنال)...")
-        for msg in messages:
-            for chat_id in TELEGRAM_CHAT_IDS:
-                send_telegram_message(msg, chat_id)
+    if rect1_res:
+        for msg in build_rect1_message(rect1_res, len(pairs)):
+            send_telegram_message(msg)
             time.sleep(0.3)
-    else:
-        send_telegram_message(
-            f"⚠️ <b>نتیجه اسکن دو مرحله‌ای:</b>\n"
-            f"• {daily_count} ارز از فیلتر روزانه عبور کردند.\n"
-            f"• اما هیچ‌کدام از فیلتر ساعتی عبور نکردند."
-        )
     
-    # ================= STAGE 3: MACD + RSI SCAN (30m) =================
-    print("\n" + "="*60)
-    print("🎯 شروع اسکن نهایی (MACD + RSI در تایم‌فریم 30 دقیقه)")
-    print("="*60)
+    # 🔲 مستطیل ۲
+    rect2_res = scan_rectangle2(rect1_res)
+    print(f"✅ مستطیل ۲ پایان یافت: {len(rect2_res)} نماد")
     
-    if hourly_count > 0:
-        stage2_candidates = [(sig['symbol'], sig['info']) for sig in hourly_signals]
-        stage2_signals = scan_stage2(
-            symbols_to_scan=stage2_candidates,
-            stage_name="🔍 اسکن نهایی (30m - MACD+RSI)"
-        )
-        stage2_count = len(stage2_signals)
-        print(f"✅ {stage2_count} ارز از اسکن نهایی عبور کردند.")
+    for msg in build_rect2_message(rect2_res, len(rect1_res)):
+        send_telegram_message(msg)
+        time.sleep(0.3)
         
-        if stage2_signals:
-            # ✅ Sort by Risk (ascending): lowest risk first (closest to EMA200)
-            stage2_sorted = sorted(stage2_signals, key=lambda x: x['risk'] if x['risk'] is not None else 999)
-            
-            messages = build_stage2_message(stage2_sorted, daily_count, hourly_count)
-            print(f"📤 در حال ارسال {len(messages)} پیام نهایی ({stage2_count} سیگنال)...")
-            for msg in messages:
-                for chat_id in TELEGRAM_CHAT_IDS:
-                    send_telegram_message(msg, chat_id)
-                time.sleep(0.3)
-        else:
-            send_telegram_message(
-                f"⚠️ <b>اسکن نهایی (30m):</b>\n"
-                f"• {hourly_count} ارز از اسکن ساعتی عبور کردند.\n"
-                f"• اما هیچ‌کدام شرایط MACD + RSI را نداشتند.\n"
-                f"• شرایط: MACD(36,78,30) > 0 و RSI(30) > 50"
-            )
-    
-    print("✅ پایان کامل اسکن سه مرحله‌ای")
+    print("✅ پایان کامل اسکن")
 
 # ================= RUN =================
 if __name__ == "__main__":
-    if not TELEGRAM_BOT_TOKEN:
-        print("❌ Error: Telegram token missing. Exiting.")
-        exit(1)
-    
-    send_telegram_message("🤖 <b>ربات اسکن سه مرحله‌ای شروع شد</b>\n📅 روزانه ← ⏰ ساعتی ← 🎯 30 دقیقه (MACD+RSI)")
+    send_telegram_message("🤖 <b>اسکن دو مستطیلی شروع شد</b>\n📦 مستطیل ۱ (روزانه+ساعتی) ← 🎯 مستطیل ۲ (30m+Risk)")
     run()
-    send_telegram_message("✅ <b>اسکن سه مرحله‌ای به پایان رسید</b>")
+    send_telegram_message("✅ <b>اسکن با موفقیت پایان یافت</b>")
