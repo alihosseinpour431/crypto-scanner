@@ -70,10 +70,12 @@ def send_telegram_message(text, chat_id=None):
         }
         try:
             r = requests.post(url, json=payload, timeout=30)
-            if DEBUG_MODE and r.status_code != 200:
-                print(f"⚠️ Telegram ({cid}): {r.status_code} | {r.text[:100]}")
+            if r.status_code == 200:
+                print(f"✅ پیام به {cid} ارسال شد.")  # ← موفقیت در کنسول
+            else:
+                print(f"⚠️ Telegram Error ({cid}): {r.status_code} | {r.text[:200]}")  # ← خطا حتی بدون DEBUG
         except Exception as e:
-            print(f"❌ Telegram Error ({cid}): {e}")
+            print(f"❌ Telegram Exception ({cid}): {e}")  # ← استثناء نمایش داده شود
 
 # ================= COINGECKO =================
 def load_market_caps():
