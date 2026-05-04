@@ -1,5 +1,5 @@
 # Trigger.py
-# ✅ نسخه نهایی با RSI روی EMA، فیلترهای دقیق و ستون Risk
+# ✅ نسخه نهایی و اصلاح‌شده: RSI on EMA (Pine Script Logic) + فیلترهای دقیق
 
 import os, time, requests, ccxt, pandas as pd, pytz, jdatetime, numpy as np
 from datetime import datetime
@@ -7,17 +7,24 @@ from html import escape
 from tqdm.auto import tqdm
 
 # ================= CONFIG =================
-EXCHANGE_ID = 'xt'
+EXCHANGE_ID = 'xt'  # صرافی مورد نظر
 SCAN_SPOT = True
 SCAN_FUTURES = True
 DAILY_TF, DAILY_LIMIT = '1d', 300
 HOURLY_TF, HOURLY_LIMIT = '1h', 300
 MIN_BARS_REQUIRED = 250
 
-# تنظیمات RSI مطابق عکس TradingView
-RSI_LENGTH = 30              # طول RSI
-RSI_EMA_LENGTH = 50          # طول EMA برای صاف‌کننده RSI (خط آبی)
-EMA_SOURCE_LENGTH = 14       # طول EMA برای منبع RSI (استاندارد تریدینگ‌ویو وقتی Source روی EMA باشد)
+# ⚙️ تنظیمات دقیق اندیکاتورها (مطابق درخواست و عکس)
+# --- تنظیمات RSI ---
+RSI_LENGTH = 30              # طول دوره RSI
+RSI_SOURCE_EMA_LENGTH = 14   # طول EMA برای منبع محاسبه RSI (Source = EMA 14)
+
+# --- تنظیمات خط آبی (Smoothing) ---
+# طبق منطق ارسالی شما: خط آبی یک EMA 50 است که روی مقادیر RSI اعمال می‌شود
+BLUE_LINE_TYPE = "EMA"       
+BLUE_LINE_LENGTH = 50        
+
+# --- تنظیمات EMA200 (برای Risk) ---
 EMA200_LENGTH = 200
 
 # ================= ENV =================
@@ -98,51 +105,65 @@ def calc_daily_ema(df):
     df['ema50'] = df['c'].ewm(span=50, adjust=False).mean()
     return df
 
-def wilder_rma(series, length):
+# =========================================================
+# FUNCTIONS FOR EXACT PINE SCRIPT LOGIC
+# =========================================================
+
+def pine_rma(series, length):
     """
-    محاسبه RMA به سبک Wilder (همان روش استاندارد RSI در TradingView)
-    فرمول: RMA = (RMA_قبلی × (length-1) + مقدار_جدید) / length
+    محاسبه RMA به سبک Wilder (دقیقاً مشابه ta.rma در Pine Script)
+    فرمول: alpha = 1/length
     """
-    rma = series.copy()
-    # مقدار اولیه: SMA برای پنجره اول
-    rma.iloc[:length] = series.iloc[:length].mean()
-    # اعمال فرمول RMA برای بقیه مقادیر
-    for i in range(length, len(series)):
-        rma.iloc[i] = (rma.iloc[i-1] * (length - 1) + series.iloc[i]) / length
-    return rma
+    alpha = 1.0 / length
+    return series.ewm(alpha=alpha, adjust=False).mean()
 
 def calc_hourly_indicators(df):
     """
-    محاسبه اندیکاتورهای ساعتی مطابق با عکس TradingView:
-    - Source: EMA(14)
-    - RSI: Length 30 روی EMA(14)
-    - RSI_MA: EMA 50 روی RSI
-    - EMA200: برای محاسبه Risk
+    محاسبه دقیق اندیکاتورها طبق منطق ارسالی:
+    1. Source = EMA(14) of Close
+    2. RSI(30) calculated on Source using Wilder's RMA
+    3. BlueLine = EMA(50) applied on the RSI values
     """
     df = df.copy()
     
-    # 1. محاسبه EMA منبع (طبق تنظیمات عکس Source: EMA)
-    df['ema_source'] = df['c'].ewm(span=EMA_SOURCE_LENGTH, adjust=False).mean()
+    # --- Step 1: Calculate Source (EMA 14) ---
+    # طبق درخواست: منبع RSI باید EMA باشد، نه قیمت بسته شدن
+    rsi_source = df['c'].ewm(span=RSI_SOURCE_EMA_LENGTH, adjust=False).mean()
     
-    # 2. محاسبه RSI روی آن EMA
-    delta = df['ema_source'].diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
+    # --- Step 2: Calculate RSI (Length 30) on Source using Wilder's RMA ---
+    change = rsi_source.diff()
     
-    avg_gain = wilder_rma(gain, RSI_LENGTH)
-    avg_loss = wilder_rma(loss, RSI_LENGTH)
+    # محاسبه Gain و Loss
+    up = np.maximum(change, 0.0)
+    down = np.maximum(-change, 0.0)
     
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    df['rsi'] = 100 - (100 / (1 + rs))
-    df['rsi'] = df['rsi'].fillna(100)
+    # تبدیل به Series برای اعمال RMA
+    up_series = pd.Series(up, index=df.index)
+    down_series = pd.Series(down, index=df.index)
     
-    # 3. محاسبه RSI_MA (خط آبی)
-    df['rsi_ma'] = df['rsi'].ewm(span=RSI_EMA_LENGTH, adjust=False).mean()
+    # اعمال Wilder's RMA
+    avg_up = pine_rma(up_series, RSI_LENGTH)
+    avg_down = pine_rma(down_series, RSI_LENGTH)
     
-    # 4. محاسبه EMA200
+    # محاسبه نهایی RSI
+    rs = avg_up / avg_down.replace(0, np.nan)
+    rsi_values = 100 - (100 / (1 + rs))
+    rsi_values = rsi_values.fillna(100) # هندل کردن حالت‌های خاص
+    
+    df['rsi'] = rsi_values  # این همان خط بنفش (Purple) است
+    
+    # --- Step 3: Calculate Blue Line (EMA 50 on RSI) ---
+    # طبق منطق ارسالی: خط آبی یک EMA است که روی خودِ RSI اعمال می‌شود
+    if BLUE_LINE_TYPE == "EMA":
+        df['rsi_ma'] = df['rsi'].ewm(span=BLUE_LINE_LENGTH, adjust=False).mean()
+    elif BLUE_LINE_TYPE == "SMA":
+        df['rsi_ma'] = df['rsi'].rolling(BLUE_LINE_LENGTH).mean()
+    else:
+        # پیش‌فرض EMA
+        df['rsi_ma'] = df['rsi'].ewm(span=BLUE_LINE_LENGTH, adjust=False).mean()
+        
+    # --- Step 4: Calculate Risk (Distance from EMA 200) ---
     df['ema200'] = df['c'].ewm(span=EMA200_LENGTH, adjust=False).mean()
-    
-    # فاصله درصدی از EMA200 (همان Risk)
     df['risk'] = (df['c'] - df['ema200']) / df['ema200'] * 100
     
     return df
@@ -156,42 +177,50 @@ def scan_with_three_filters(pairs):
     
     for symbol, info in tqdm(pairs, desc="Scanning", total=total):
         try:
-            # --- فیلتر ۱: روزانه (EMA30 > EMA50) ---
+            # --- 🛡️ فیلتر ۱: روزانه (EMA30 > EMA50) ---
             df_d = fetch_ohlcv(symbol, DAILY_TF, DAILY_LIMIT)
             if df_d is None: continue
             df_d = calc_daily_ema(df_d)
             last_d = df_d.iloc[-1]
             
+            # چک کردن NaN و شرط صعودی بودن
             if not (pd.notna(last_d['ema30']) and pd.notna(last_d['ema50']) and last_d['ema30'] > last_d['ema50']):
                 continue
             d_pass += 1
 
-            # --- فیلتر ۲ و ۳: ساعتی ---
+            # --- 🛡️ فیلتر ۲ و ۳: ساعتی (منطق دقیق Pine Script) ---
             df_h = fetch_ohlcv(symbol, HOURLY_TF, HOURLY_LIMIT)
             if df_h is None: continue
             df_h = calc_hourly_indicators(df_h)
             last_h = df_h.iloc[-1]
 
-            # فیلتر ۲: خط بنفش (RSI) بالای خط آبی (RSI_MA)
-            if not (pd.notna(last_h['rsi']) and pd.notna(last_h['rsi_ma']) and last_h['rsi'] > last_h['rsi_ma']):
+            # استخراج مقادیر نهایی
+            rsi_val = last_h['rsi']      # خط بنفش (Purple)
+            rsi_ma_val = last_h['rsi_ma'] # خط آبی (Blue)
+
+            # 🛡️ فیلتر ۲: خط بنفش > خط آبی
+            # اگر هر کدام NaN بودند، رد کن
+            if not (pd.notna(rsi_val) and pd.notna(rsi_ma_val) and rsi_val > rsi_ma_val):
                 continue
             r_pass += 1
 
-            # فیلتر ۳: خط بنفش (RSI) بین 30 و 70
-            rsi_val = last_h['rsi']
+            # 🛡️ فیلتر ۳: محدوده امن (30 < RSI < 70)
+            # طبق درخواست: فقط آن‌هایی که RSI (خط بنفش) بین ۳۰ و ۷۰ است نمایش داده شود
             if not (pd.notna(rsi_val) and 30 < rsi_val < 70):
                 continue
             rsi_pass += 1
 
-            # مقدار Risk
+            # محاسبه Risk برای مرتب‌سازی
             risk_val = last_h['risk'] if pd.notna(last_h['risk']) else 0.0
 
+            # تعیین نوع بازار
             mkt = 'F' if (info.get('future') or info.get('swap')) else 'S'
+            
             results.append({
                 'symbol': symbol,
                 'price': last_h['c'],
-                'rsi': last_h['rsi'],
-                'rsi_ma': last_h['rsi_ma'],
+                'rsi': rsi_val,          # Purple
+                'rsi_ma': rsi_ma_val,    # Blue
                 'risk': risk_val,
                 'mc': get_market_cap(symbol),
                 'mkt_type': mkt,
@@ -199,20 +228,20 @@ def scan_with_three_filters(pairs):
             })
         except Exception as e:
             if DEBUG_MODE: print(f"⚠️ Error {symbol}: {e}")
-        time.sleep(0.02)
+        time.sleep(0.02) # جلوگیری از بن شدن IP
 
     final_pass = len(results)
     
-    # مرتب‌سازی صعودی بر اساس Risk (کمترین ریسک → بیشترین ریسک)
+    # مرتب‌سازی صعودی بر اساس Risk (کمترین ریسک اول)
     results.sort(key=lambda x: x['risk'])
 
     print("\n" + "="*50)
-    print(f"📊 نتیجه فیلترها:")
-    print(f"   کل: {total}")
-    print(f"   ✅ فیلتر ۱ (EMA روزانه): {d_pass}")
-    print(f"   ✅ فیلتر ۲ (RSI > RSI_MA): {r_pass}")
+    print(f"📊 گزارش فیلترها:")
+    print(f"   کل نمادها: {total}")
+    print(f"   ✅ فیلتر ۱ (Daily EMA): {d_pass}")
+    print(f"   ✅ فیلتر ۲ (Purple > Blue): {r_pass}")
     print(f"   ✅ فیلتر ۳ (30 < RSI < 70): {rsi_pass}")
-    print(f"   🎯 سیگنال نهایی: {final_pass}")
+    print(f"   🎯 خروجی نهایی: {final_pass}")
     print("="*50)
 
     stats = {'daily': d_pass, 'rsi_cross': r_pass, 'rsi_range': rsi_pass, 'final': final_pass}
@@ -220,24 +249,24 @@ def scan_with_three_filters(pairs):
 
 def build_message(signals, total, d_pass, r_pass, rsi_pass, final_pass):
     now = jdatetime.datetime.now(pytz.timezone('Asia/Tehran')).strftime('%Y/%m/%d %H:%M:%S')
+    
     header = (
-        f"🎯 <b>گزارش اسکن | RSI on EMA</b>\n"
+        f"🎯 <b>گزارش اسکن | RSI on EMA (Exact Logic)</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📊 کل نمادها: <code>{total}</code>\n"
-        f"├─ ✅ فیلتر ۱ (EMA روزانه): <code>{d_pass}</code>\n"
-        f"├─ ✅ فیلتر ۲ (RSI > RSI_MA): <code>{r_pass}</code>\n"
+        f"├─ ✅ فیلتر ۱ (Daily EMA30&gt;50): <code>{d_pass}</code>\n"
+        f"├─ ✅ فیلتر ۲ (Purple&gt;Blue): <code>{r_pass}</code>\n"
         f"├─ ✅ فیلتر ۳ (30 &lt; RSI &lt; 70): <code>{rsi_pass}</code>\n"
         f"└─ 🎯 سیگنال نهایی: <code>{final_pass}</code>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
-        f" شرایط:\n"
-        f" ├─ 1️⃣ روزانه: EMA30 &gt; EMA50\n"
-        f" ├─ 2️ ساعتی: RSI(30) &gt; RSI_MA(50)\n"
-        f" └─ 3️⃣ ساعتی: 30 &lt; RSI &lt; 70\n"
-        f"  RSI محاسبه‌شده روی EMA(14)\n"
-        f" 📏 مرتب‌سازی: بر اساس کمترین Risk\n"
+        f" ⚙️ تنظیمات محاسباتی:\n"
+        f" ├─ منبع RSI: EMA(14) قیمت\n"
+        f" ├─ RSI Length: 30 (Wilder's RMA)\n"
+        f" ├─ خط آبی: EMA(50) روی RSI\n"
+        f" └─ مرتب‌سازی: بر اساس کمترین Risk (فاصله از EMA200)\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
     )
-    footer = f"\n⏰ {now} 🇮\n🤖 AlphaScanner v5.0"
+    footer = f"\n⏰ {now} 🇮\n🤖 AlphaScanner v6.0 (PineLogic)"
 
     msgs = []
     body = ""
@@ -246,10 +275,13 @@ def build_message(signals, total, d_pass, r_pass, rsi_pass, final_pass):
     if signals:
         for r, s in enumerate(signals, 1):
             risk_str = f"{s['risk']:+.2f}%" if pd.notna(s['risk']) else "N/A"
+            
+            # نمایش دقیق مقادیر برای اطمینان کاربر
             card = (
                 f"{r}. {escape(s['symbol'])} [{s['mkt_type']}]\n"
-                f"💰 {s['price']:,.4f} USDT\n"
-                f"🟣 RSI: {s['rsi']:.1f} | 🔵 RSI_MA: {s['rsi_ma']:.1f}\n"
+                f"💰 Price: {s['price']:,.4f} USDT\n"
+                f"🟣 Purple (RSI): <b>{s['rsi']:.2f}</b>\n"
+                f"🔵 Blue (EMA50): {s['rsi_ma']:.2f}\n"
                 f"⚠️ Risk: {risk_str}\n"
                 f"💎 MC: {fmt_mc(s['mc'])}\n"
                 f"─────────────────────\n"
@@ -284,11 +316,11 @@ def run():
 
 if __name__ == "__main__":
     start_msg = (
-        "🤖 <b>اسکن RSI on EMA شروع شد</b>\n"
+        "🤖 <b>اسکن RSI on EMA (Pine Logic) شروع شد</b>\n"
         "📅 روزانه: EMA30 &gt; EMA50\n"
-        "⏰ ساعتی: RSI(30) &gt; RSI_MA(50)\n"
+        "⏰ ساعتی: RSI(30) on EMA(14) &gt; EMA(50)\n"
         "⚖️ محدوده RSI: 30 &lt; RSI &lt; 70\n"
-        "📉 منبع RSI: EMA(14)\n"
+        "📉 متد: Wilder's RMA\n"
         "📏 مرتب‌سازی بر اساس Risk"
     )
     send_telegram_message(start_msg)
