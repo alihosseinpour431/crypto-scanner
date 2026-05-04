@@ -25,10 +25,10 @@ SCAN_FUTURES = True
 
 # تایم‌فریم‌ها
 DAILY_TF = '1d'
-DAILY_LIMIT = 100
+DAILY_LIMIT = 300
 HOURLY_TF = '1h'
 HOURLY_LIMIT = 300
-MIN_BARS_REQUIRED = 250
+MIN_BARS_REQUIRED = 300
 
 # پارامترهای اندیکاتور
 RSI_LENGTH = 30
@@ -198,7 +198,7 @@ def run_scan(pairs):
             if not (pd.notna(last_daily['ema30']) and pd.notna(last_daily['ema50'])):
                 continue
                 
-            if last_daily['ema30'] < last_daily['ema50']:
+            if last_daily['ema30'] > last_daily['ema50']:
                 continue  # ❌ فیلتر ۱ رد شد
             
             passed_filter1 += 1
@@ -216,7 +216,7 @@ def run_scan(pairs):
             if not (pd.notna(last_hourly['rsi']) and pd.notna(last_hourly['rsi_ma'])):
                 continue
                 
-            if last_hourly['rsi'] <= last_hourly['rsi_ma']:
+            if last_hourly['rsi'] >= last_hourly['rsi_ma']:
                 continue  # ❌ فیلتر ۲ رد شد
             
             passed_filter2 += 1
