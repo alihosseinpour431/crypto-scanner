@@ -1,14 +1,18 @@
 # Trigger.py
-# ✅ نسخه نهایی: EMA30 > EMA50 (سختگیرانه) + سه فیلتر + Risk%
+# ✅ نسخه نهایی بهینه‌شده برای GitHub Actions - منطق سه فیلتر
+# فیلتر ۱: روزانه - EMA30 > EMA50
+# فیلتر ۲: ساعتی - RSI(30) > EMA50(RSI)
+# فیلتر ۳: کنترل اشباع - 30 < RSI_MA < 70
 
 import os
 import time
 import requests
 import ccxt
 import pandas as pd
-import numpy as np
 import pytz
 import jdatetime
+import numpy as np
+from datetime import datetime
 from html import escape
 from tqdm.auto import tqdm
 
@@ -17,236 +21,288 @@ EXCHANGE_ID = 'xt'
 SCAN_SPOT = True
 SCAN_FUTURES = True
 
+# تایم‌فریم‌ها و حداقل کندل
 DAILY_TF = '1d'
-DAILY_LIMIT = 120
+DAILY_LIMIT = 300
 HOURLY_TF = '1h'
-HOURLY_LIMIT = 350
-MIN_BARS_REQUIRED = 280
+HOURLY_LIMIT = 300
+MIN_BARS_REQUIRED = 250
 
+# پارامترهای اندیکاتور
 RSI_LENGTH = 30
-RSI_MA_LENGTH = 50
+RSI_EMA_LENGTH = 50
 
-# ================= ENV =================
+# ================= ENV & SECURITY =================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+if not TELEGRAM_BOT_TOKEN:
+    raise ValueError("❌ TELEGRAM_BOT_TOKEN is not set in environment variables!")
+
 TELEGRAM_CHAT_IDS = [cid.strip() for cid in os.getenv("TELEGRAM_CHAT_ID", "487817626").split(",") if cid.strip()]
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
-
 COINGECKO_API = "https://api.coingecko.com/api/v3"
 
-# ================= EXCHANGE =================
-exchange = getattr(ccxt, EXCHANGE_ID)({
-    'enableRateLimit': True,
-    'timeout': 30000
-})
-exchange.load_markets()
+# ================= EXCHANGE INIT =================
+try:
+    exchange = getattr(ccxt, EXCHANGE_ID)({
+        'enableRateLimit': True,
+        'timeout': 30000
+    })
+    exchange_markets = exchange.load_markets()
+except Exception as e:
+    print(f"❌ Critical Error initializing exchange: {e}")
+    exit(1)
 
+# ================= CACHE =================
 market_cap_cache = {}
 
 # ================= TELEGRAM =================
 def send_telegram_message(text, chat_id=None):
     targets = [chat_id] if chat_id else TELEGRAM_CHAT_IDS
     for cid in targets:
+        cid = cid.strip()
         if not cid: continue
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        payload = {
+            'chat_id': cid,
+            'text': text,
+            'parse_mode': 'HTML',
+            'disable_web_page_preview': True
+        }
         try:
-            requests.post(
-                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                json={
-                    'chat_id': cid,
-                    'text': text,
-                    'parse_mode': 'HTML',
-                    'disable_web_page_preview': True
-                },
-                timeout=30
-            )
-        except: pass
+            r = requests.post(url, json=payload, timeout=30)
+            if DEBUG_MODE and r.status_code != 200:
+                print(f"⚠️ Telegram ({cid}): {r.status_code} | {r.text[:100]}")
+        except Exception as e:
+            print(f"❌ Telegram Error ({cid}): {e}")
 
 # ================= COINGECKO =================
 def load_market_caps():
-    global market_cap_cache
     if market_cap_cache: return
-    print("📥 Loading Market Caps...")
-    for page in range(1, 8):
+    print("📥 Loading Market Cap from CoinGecko ...")
+    session = requests.Session()
+    for page in range(1, 11):
         try:
-            r = requests.get(
-                f"{COINGECKO_API}/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=250&page={page}",
-                timeout=20
-            )
-            for coin in r.json():
-                sym = str(coin.get('symbol', '')).upper()
-                if sym and coin.get('market_cap'):
-                    market_cap_cache[sym] = coin['market_cap']
-            time.sleep(0.15)
+            url = f"{COINGECKO_API}/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=250&page={page}&sparkline=false"
+            r = session.get(url, timeout=20)
+            data = r.json()
+            if not isinstance(data, list) or len(data) == 0: break
+            for coin in data:
+                sym = str(coin.get('symbol', '')).upper().strip()
+                mc = coin.get('market_cap')
+                if sym and isinstance(mc, (int, float)):
+                    market_cap_cache[sym] = mc
+            if len(data) < 250: break
+            time.sleep(0.1)
         except: break
-    print(f"✅ Loaded {len(market_cap_cache)} market caps")
+    print(f"✅ Market Cap loaded: {len(market_cap_cache)} symbols")
 
-# ================= PAIRS =================
+def get_market_cap(symbol):
+    base = symbol.split('/')[0].upper()
+    return market_cap_cache.get(base)
+
+def fmt_mc(value):
+    if value is None or (isinstance(value, float) and np.isnan(value)): return "🔸 N/A"
+    v = float(value)
+    if v >= 1e12: return f"💎 ${v/1e12:.2f}T"
+    if v >= 1e9: return f"💎 ${v/1e9:.2f}B"
+    if v >= 1e6: return f"💎 ${v/1e6:.2f}M"
+    return f"💎 ${v:,.0f}"
+
+# ================= DEDUPLICATION =================
 def get_filtered_pairs():
     symbol_map = {}
-    for symbol, info in exchange.markets.items():
-        if not info.get('active') or info.get('quote') != 'USDT':
-            continue
+    for symbol, info in exchange_markets.items():
+        if not info.get('active') or info.get('quote') != 'USDT': continue
         is_spot = info.get('spot', False)
-        is_future = info.get('future') or info.get('swap', False)
-        
+        is_future = info.get('future', False) or info.get('swap', False)
         if (SCAN_SPOT and is_spot) or (SCAN_FUTURES and is_future):
             base = symbol.split('/')[0].upper()
-            if base not in symbol_map or (is_spot and not symbol_map[base][2]):
+            if base not in symbol_map:
                 symbol_map[base] = (symbol, info, is_spot)
+            elif is_spot and not symbol_map[base][2]:
+                symbol_map[base] = (symbol, info, True)
     return [(sym, inf) for sym, inf, _ in symbol_map.values()]
 
-# ================= INDICATORS =================
+# ================= DATA FETCH =================
 def fetch_ohlcv(symbol, timeframe, limit):
     try:
-        data = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
-        if len(data) < MIN_BARS_REQUIRED:
-            return None
+        data = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+        if len(data) < MIN_BARS_REQUIRED: return None
         df = pd.DataFrame(data, columns=['ts', 'o', 'h', 'l', 'c', 'v'])
         df['ts'] = pd.to_datetime(df['ts'], unit='ms', utc=True)
         return df
     except Exception as e:
-        if DEBUG_MODE:
-            print(f"Fetch error {symbol}: {e}")
+        if DEBUG_MODE: print(f"⚠️ Fetch error {symbol}: {e}")
         return None
 
+# ================= INDICATOR 1: DAILY EMA =================
 def calc_daily_ema(df):
+    """
+    فیلتر اول - تایم روزانه
+    محاسبه EMA30 و EMA50 روی قیمت بسته شدن
+    شرط: EMA30 > EMA50 (روند صعودی کوتاه‌مدت)
+    """
     df = df.copy()
     df['ema30'] = df['c'].ewm(span=30, adjust=False).mean()
     df['ema50'] = df['c'].ewm(span=50, adjust=False).mean()
     return df
 
-def calc_hourly_indicators(df):
+# ================= INDICATOR 2: HOURLY RSI + RSI_MA =================
+def calc_hourly_rsi(df):
+    """
+    فیلتر دوم - تایم ساعتی
+    1. محاسبه RSI(30)
+    2. محاسبه EMA50 روی RSI (به نام RSI_MA)
+    شرط: RSI > RSI_MA (مومنتوم فعلی قوی‌تر از میانگین مومنتوم)
+    """
     df = df.copy()
     
-    # RSI(30)
+    # --- محاسبه RSI(30) ---
     delta = df['c'].diff()
     gain = delta.where(delta > 0, 0).rolling(RSI_LENGTH).mean()
     loss = -delta.where(delta < 0, 0).rolling(RSI_LENGTH).mean()
+    
     rs = gain / loss.replace(0, np.nan)
     df['rsi'] = 100 - (100 / (1 + rs))
-    df['rsi'] = df['rsi'].fillna(100)
+    df['rsi'] = df['rsi'].fillna(100)  # وقتی loss=0 باشد، RSI=100
     
-    df['rsi_ma'] = df['rsi'].ewm(span=RSI_MA_LENGTH, adjust=False).mean()
-    df['ema200'] = df['c'].ewm(span=200, adjust=False).mean()
+    # --- محاسبه RSI_MA = EMA50(RSI) ---
+    df['rsi_ma'] = df['rsi'].ewm(span=RSI_EMA_LENGTH, adjust=False).mean()
     
     return df
 
-# ================= RENDERERS =================
-def render_final_item(idx, item):
-    risk_color = "🟢" if item['risk_pct'] < 10 else "🟡" if item['risk_pct'] < 30 else "🔴"
-    return (
-        f"{idx}. {escape(item['symbol'])} [{item['mkt_type']}]\n"
-        f"💰 {item['price']:,.4f}\n"
-        f"📊 RSI: {item['rsi']:.1f} | MA: {item['rsi_ma']:.1f} ({item['rsi_diff']:+.1f})\n"
-        f"📅 EMA30/50: {item['daily_ema30']:.4f} / {item['daily_ema50']:.4f}\n"
-        f"{risk_color} Risk: {item['risk_pct']:+.2f}%\n"
-        f"💎 MC: {fmt_mc(item['mc'])}\n"
-        f"─────────────────────\n"
-    )
-
-def fmt_mc(value):
-    if not value or pd.isna(value): return "N/A"
-    v = float(value)
-    if v >= 1e12: return f"${v/1e12:.2f}T"
-    if v >= 1e9:  return f"${v/1e9:.2f}B"
-    if v >= 1e6:  return f"${v/1e6:.2f}M"
-    return f"${v:,.0f}"
-
-# ================= MAIN SCAN =================
-def run_scan(pairs):
+# ================= SCAN MAIN LOGIC =================
+def scan_with_three_filters(pairs):
+    """
+    منطق اصلی اسکن با سه فیلتر:
+    1️⃣ روزانه: EMA30 > EMA50
+    2️⃣ ساعتی: RSI > RSI_MA
+    3️⃣ کنترل اشباع: 30 < RSI_MA < 70
+    """
     results = []
-    f1_count = f2_count = 0
-
-    print(f"🔍 اسکن {len(pairs)} نماد...")
-
-    for symbol, info in tqdm(pairs):
+    total = len(pairs)
+    print(f"🔍 شروع اسکن با ۳ فیلتر روی {total} نماد...")
+    
+    for idx, (symbol, info) in enumerate(tqdm(pairs, desc="Scanning", total=total), 1):
         try:
-            # === فیلتر ۱: روزانه ===
+            # 🔹 فیلتر ۱: تایم روزانه - EMA30 > EMA50
             df_d = fetch_ohlcv(symbol, DAILY_TF, DAILY_LIMIT)
             if df_d is None: continue
             df_d = calc_daily_ema(df_d)
             last_d = df_d.iloc[-1]
-
-            if last_d['ema30'] <= last_d['ema50']:   # ← تغییر مهم: > (سختگیرانه)
-                continue
-
-            f1_count += 1
-            mkt = 'F' if (info.get('future') or info.get('swap')) else 'S'
-
-            # === فیلتر ۲ و ۳: ساعتی ===
+            
+            cond_daily = (
+                pd.notna(last_d['ema30']) and 
+                pd.notna(last_d['ema50']) and 
+                last_d['ema30'] > last_d['ema50']
+            )
+            if not cond_daily: continue  # ❌ رد شد از فیلتر روزانه
+            
+            # 🔹 فیلتر ۲ و ۳: تایم ساعتی - RSI و RSI_MA
             df_h = fetch_ohlcv(symbol, HOURLY_TF, HOURLY_LIMIT)
             if df_h is None: continue
-            df_h = calc_hourly_indicators(df_h)
+            df_h = calc_hourly_rsi(df_h)
             last_h = df_h.iloc[-1]
-
-            if last_h['rsi'] <= last_h['rsi_ma']:
-                continue
-            f2_count += 1
-
-            if not (30 <= last_h['rsi_ma'] <= 70):
-                continue
-
-            if pd.isna(last_h['ema200']) or last_h['ema200'] == 0:
-                continue
-
-            risk_pct = (last_h['c'] - last_h['ema200']) / last_h['ema200'] * 100
-
+            
+            # فیلتر ۲: RSI > RSI_MA (قدرت گرفتن مومنتوم)
+            cond_rsi = (
+                pd.notna(last_h['rsi']) and 
+                pd.notna(last_h['rsi_ma']) and 
+                last_h['rsi'] > last_h['rsi_ma']
+            )
+            if not cond_rsi: continue  # ❌ رد شد از فیلتر مومنتوم
+            
+            # فیلتر ۳: 30 < RSI_MA < 70 (ناحیه متعادل، بدون اشباع)
+            rsi_ma_val = last_h['rsi_ma']
+            cond_balance = (
+                pd.notna(rsi_ma_val) and 
+                30 < rsi_ma_val < 70
+            )
+            if not cond_balance: continue  # ❌ رد شد از فیلتر اشباع
+            
+            # ✅ همه فیلترها پاس شدند!
+            mkt = 'F' if (info.get('future') or info.get('swap')) else 'S'
             results.append({
                 'symbol': symbol,
                 'price': last_h['c'],
-                'daily_ema30': last_d['ema30'],
-                'daily_ema50': last_d['ema50'],
                 'rsi': last_h['rsi'],
                 'rsi_ma': last_h['rsi_ma'],
-                'rsi_diff': last_h['rsi'] - last_h['rsi_ma'],
-                'ema200': last_h['ema200'],
-                'risk_pct': risk_pct,
-                'mc': market_cap_cache.get(symbol.split('/')[0].upper()),
-                'mkt_type': mkt
+                'mc': get_market_cap(symbol),
+                'mkt_type': mkt,
+                'info': info
             })
-
+            
         except Exception as e:
-            if DEBUG_MODE:
-                print(f"Error {symbol}: {e}")
+            if DEBUG_MODE: print(f"⚠️ Error {symbol}: {e}")
+        time.sleep(0.02)  # جلوگیری از ریت‌لیمیت
+    
+    return results
 
-    results.sort(key=lambda x: x['risk_pct'])
-    return results, f1_count, f2_count
+# ================= MESSAGE BUILDER =================
+def build_final_message(signals, total_scanned):
+    now = jdatetime.datetime.now(pytz.timezone('Asia/Tehran')).strftime('%Y/%m/%d %H:%M:%S')
+    
+    header = (
+        f"🎯 <b>گزارش نهایی اسکن | ۳ فیلتر هوشمند</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📊 نمادهای بررسی شده: <code>{total_scanned}</code>\n"
+        f"✅ سیگنال‌های یافت شده: <code>{len(signals)}</code>\n"
+        f"📋 شرایط فیلترها:\n"
+        f" ├─ 1️⃣ روزانه: EMA30 {'>'} EMA50 ✅\n"
+        f" ├─ 2️⃣ ساعتی: RSI(30) {'>'} RSI_MA ✅\n"
+        f" └─ 3️⃣ اشباع: 30 {'<'} RSI_MA {'<'} 70 ✅\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    )
+    footer = f"\n⏰ {now} 🇮🇷\n🤖 AlphaScanner v3.0"
+    
+    msgs = []
+    body = ""
+    MAX = 4000  # محدودیت تلگرام
+    
+    for r, s in enumerate(signals, 1):
+        card = (
+            f"{r}. {escape(s['symbol'])} [{s['mkt_type']}]\n"
+            f"💰 {s['price']:,.4f} USDT\n"
+            f"📊 RSI: {s['rsi']:.1f} | RSI_MA: {s['rsi_ma']:.1f}\n"
+            f"💎 MC: {fmt_mc(s['mc'])}\n"
+            f"─────────────────────\n"
+        )
+        # مدیریت طول پیام برای جلوگیری از خطای تلگرام
+        if len(header) + len(body) + len(card) + len(footer) > MAX - 100:
+            msgs.append(header + body + footer)
+            body = card
+        else:
+            body += card
+    
+    if body.strip():
+        msgs.append(header + body + footer)
+    
+    if not msgs:
+        msgs.append(f"{header}❌ هیچ نمادی هر سه فیلتر را پاس نکرد.{footer}")
+    
+    return msgs
 
-# ================= RUN =================
+# ================= MAIN =================
 def run():
+    print("🚀 شروع اسکن با منطق ۳ فیلتر...")
     load_market_caps()
     pairs = get_filtered_pairs()
-    print(f"📊 تعداد نمادهای بررسی: {len(pairs)}")
+    print(f"📊 کل نمادهای فعال (بدون تکرار): {len(pairs)}")
+    
+    # 🔹 اجرای اسکن با سه فیلتر
+    results = scan_with_three_filters(pairs)
+    print(f"✅ اسکن پایان یافت: {len(results)} نماد انتخاب شدند")
+    
+    # 🔹 ارسال گزارش به تلگرام
+    for msg in build_final_message(results, len(pairs)):
+        send_telegram_message(msg)
+        time.sleep(0.3)
+    
+    print("✅ پایان کامل اسکن")
+    return results
 
-    final, f1, f2 = run_scan(pairs)
-
-    summary = f"""
-🚀 <b>اسکن سه مرحله‌ای (نسخه اصلاح‌شده)</b>
-━━━━━━━━━━━━━━━━━━━━━━
-کل نمادها: <code>{len(pairs)}</code>
-✅ فیلتر ۱ (EMA30 > EMA50): <code>{f1}</code>
-✅ فیلتر ۲ (RSI > RSI_MA): <code>{f2}</code>
-✅ نهایی (RSI_MA 30-70): <code>{len(final)}</code>
-━━━━━━━━━━━━━━━━━━━━━━
-⏰ {jdatetime.datetime.now(pytz.timezone('Asia/Tehran')).strftime('%Y/%m/%d %H:%M')}
-"""
-    send_telegram_message(summary)
-
-    # ارسال نتایج نهایی
-    if final:
-        header = "✅ <b>نمادهای نهایی (مرتب شده بر اساس ریسک کم به زیاد)</b>\n━━━━━━━━━━━━━━━━━━━━━━\n"
-        msg = header
-        for i, item in enumerate(final[:30], 1):   # حداکثر ۳۰ تا برای جلوگیری از طولانی شدن
-            msg += render_final_item(i, item)
-            if len(msg) > 3800:
-                send_telegram_message(msg)
-                msg = header
-        if msg:
-            send_telegram_message(msg)
-    else:
-        send_telegram_message("❌ هیچ نمادی تمام فیلترها را پاس نکرد.\n\n<b>نکته:</b> بازار ممکن است در شرایط نزولی باشد.")
-
-    print("✅ اسکن تمام شد")
-
+# ================= RUN =================
 if __name__ == "__main__":
-    send_telegram_message("🤖 اسکنر شروع شد...\nفیلتر ۱: EMA30 > EMA50")
+    send_telegram_message("🤖 <b>اسکن ۳ فیلتری شروع شد</b>\n📅 روزانه: EMA30{'>'}EMA50\n⏰ ساعتی: RSI{'>'}RSI_MA\n⚖️ اشباع: 30{'<'}RSI_MA{'<'}70")
     run()
+    send_telegram_message("✅ <b>اسکن با موفقیت پایان یافت</b>")
