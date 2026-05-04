@@ -1,9 +1,12 @@
+--- scanner_xt_new.py (原始)
 
-# scanner_xt.py
-# ✅ اسکنر بازار کریپتو - صرافی XT
+
++++ scanner_xt_new.py (修改后)
+# scanner_xt_new.py
+# ✅ اسکنر بازار کریپتو - صرافی XT با فیلترهای جدید
 # فیلتر ۱: روزانه - EMA30 > EMA50
-# فیلتر ۲: RSI > RSI_MA (با منطق Pine Script)
-# فیلتر ۳: RSI بین 30 تا 70
+# فیلتر ۲: ساعتی - EMA30 > EMA50 > EMA200
+# فیلتر ۳: ریسک - (EMA200 - EMA50) / EMA200 * 100 => بین 0 تا 10 درصد
 
 import os
 import time
@@ -19,20 +22,18 @@ EXCHANGE_ID = 'xt'
 SCAN_SPOT = True
 SCAN_FUTURES = True
 
-# تایم‌فریم روزانه
+# تایم‌فریم‌ها
 DAILY_TF = '1d'
 DAILY_LIMIT = 300
-
-# پارامترهای RSI (مطابق کد کاربر)
-RSI_LENGTH = 30
-RSI_SOURCE_TYPE = "EMA"  # EMA یا Close
-
-# Smoothing settings
-MA_TYPE = "EMA"      # None / SMA / EMA / SMMA / WMA
-MA_LENGTH = 50
+HOURLY_TF = '1h'
+HOURLY_LIMIT = 300
 
 # حداقل کندل مورد نیاز
-MIN_BARS_REQUIRED = 100
+MIN_BARS_REQUIRED = 200
+
+# تنظیمات ریسک
+MIN_RISK = 0.0
+MAX_RISK = 10.0
 
 # ================= ENV & SECURITY =================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -107,135 +108,86 @@ def fetch_ohlcv(symbol, timeframe, limit):
             print(f"⚠️ Fetch error {symbol}: {e}")
         return None
 
-# ================= PINE RMA (Wilder's Smoothing) =================
-def pine_rma(series, length):
-    """
-    محاسبه RMA مطابق با ta.rma() در Pine Script
-    این همان Wilder's smoothing است
-    """
-    alpha = 1.0 / length
-    return series.ewm(alpha=alpha, adjust=False).mean()
-
-# ================= PINE MA =================
-def pine_ma(series, length, ma_type):
-    """محاسبه Moving Average مطابق با Pine Script"""
-    if ma_type == "None" or ma_type is None:
-        return pd.Series(np.nan, index=series.index)
-
-    elif ma_type == "SMA":
-        return series.rolling(length).mean()
-
-    elif ma_type == "EMA":
-        return series.ewm(span=length, adjust=False).mean()
-
-    elif ma_type == "SMMA":
-        return pine_rma(series, length)
-
-    elif ma_type == "WMA":
-        weights = np.arange(1, length + 1)
-        return series.rolling(length).apply(
-            lambda x: np.dot(x, weights) / weights.sum(),
-            raw=True
-        )
-
-    else:
-        raise ValueError(f"Unsupported MA type: {ma_type}")
-
-# ================= EXACT PINE RSI =================
-def calc_pine_rsi(df, rsi_length, rsi_source_type="EMA"):
-    """
-    محاسبه RSI دقیقاً مطابق با Pine Script:
-    change = ta.change(rsiSourceInput)
-    up = ta.rma(math.max(change,0), rsiLengthInput)
-    down = ta.rma(-math.min(change,0), rsiLengthInput)
-    """
-    # تعیین منبع RSI
-    if rsi_source_type == "EMA":
-        rsi_source = df["close"].ewm(span=rsi_length, adjust=False).mean()
-    else:
-        rsi_source = df["close"]
-
-    # محاسبه تغییرات
-    change = rsi_source.diff()
-
-    # محاسبه up و down
-    up = np.maximum(change, 0.0)
-    down = np.maximum(-change, 0.0)
-
-    up = pd.Series(up, index=df.index)
-    down = pd.Series(down, index=df.index)
-
-    # اعمال RMA (Wilder's smoothing)
-    avg_up = pine_rma(up, rsi_length)
-    avg_down = pine_rma(down, rsi_length)
-
-    # محاسبه RS و RSI
-    rs = avg_up / avg_down
-
-    rsi = np.where(
-        avg_down == 0,
-        100.0,
-        np.where(avg_up == 0, 0.0, 100.0 - (100.0 / (1.0 + rs)))
-    )
-
-    df["rsi"] = pd.Series(rsi, index=df.index)
-
-    return df
-
 # ================= SCAN FUNCTION =================
 def scan_market(pairs):
     """
     اسکن بازار با سه فیلتر:
     ۱. روزانه: EMA30 > EMA50
-    ۲. RSI > RSI_MA (با منطق Pine)
-    ۳. RSI بین 30 تا 70
+    ۲. ساعتی: EMA30 > EMA50 > EMA200
+    ۳. ریسک: (EMA200 - EMA50) / EMA200 * 100 => بین 0 تا 10 درصد
     """
     results = []
     total = len(pairs)
 
     print(f"🔍 شروع اسکن {total} نماد...")
     print(f"   فیلتر ۱: EMA30 > EMA50 (روزانه)")
-    print(f"   فیلتر ۲: RSI > RSI_MA ({MA_TYPE} {MA_LENGTH})")
-    print(f"   فیلتر ۳: 30 < RSI < 70")
+    print(f"   فیلتر ۲: EMA30 > EMA50 > EMA200 (ساعتی)")
+    print(f"   فیلتر ۳: Risk% = (EMA200 - EMA50) / EMA200 * 100 => بین {MIN_RISK} تا {MAX_RISK} درصد")
     print("-" * 50)
 
     for idx, (symbol, info) in enumerate(tqdm(pairs, desc="Scanning", total=total), 1):
         try:
-            # دریافت داده‌های روزانه
-            df = fetch_ohlcv(symbol, DAILY_TF, DAILY_LIMIT)
+            # ========== فیلتر ۱: روزانه ==========
+            df_daily = fetch_ohlcv(symbol, DAILY_TF, DAILY_LIMIT)
 
-            if df is None:
+            if df_daily is None:
                 continue
 
-            # محاسبه EMA30 و EMA50 قیمت
-            df['ema30'] = df['close'].ewm(span=30, adjust=False).mean()
-            df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
+            # محاسبه EMA30 و EMA50 برای روزانه
+            df_daily['ema30'] = df_daily['close'].ewm(span=30, adjust=False).mean()
+            df_daily['ema50'] = df_daily['close'].ewm(span=50, adjust=False).mean()
 
-            # محاسبه RSI با منطق Pine
-            df = calc_pine_rsi(df, RSI_LENGTH, RSI_SOURCE_TYPE)
-
-            # محاسبه RSI_MA
-            df['rsi_ma'] = pine_ma(df['rsi'], MA_LENGTH, MA_TYPE)
-
-            # گرفتن آخرین مقدار معتبر
-            last = df.iloc[-1]
+            last_daily = df_daily.iloc[-1]
 
             # بررسی مقادیر NaN
-            if pd.isna(last['close']) or pd.isna(last['ema30']) or pd.isna(last['ema50']):
-                continue
-            if pd.isna(last['rsi']) or pd.isna(last['rsi_ma']):
+            if pd.isna(last_daily['close']) or pd.isna(last_daily['ema30']) or pd.isna(last_daily['ema50']):
                 continue
 
-            # فیلتر ۱: EMA30 > EMA50
-            if not (last['ema30'] > last['ema50']):
+            # شرط ۱: EMA30 > EMA50 در روزانه
+            if not (last_daily['ema30'] > last_daily['ema50']):
                 continue
 
-            # فیلتر ۲: RSI > RSI_MA
-            if not (last['rsi'] > last['rsi_ma']):
+            # ========== فیلتر ۲: ساعتی ==========
+            df_hourly = fetch_ohlcv(symbol, HOURLY_TF, HOURLY_LIMIT)
+
+            if df_hourly is None:
                 continue
 
-            # فیلتر ۳: RSI بین 30 تا 70
-            if not (30 < last['rsi'] < 70):
+            # محاسبه EMA30, EMA50, EMA200 برای ساعتی
+            df_hourly['ema30'] = df_hourly['close'].ewm(span=30, adjust=False).mean()
+            df_hourly['ema50'] = df_hourly['close'].ewm(span=50, adjust=False).mean()
+            df_hourly['ema200'] = df_hourly['close'].ewm(span=200, adjust=False).mean()
+
+            last_hourly = df_hourly.iloc[-1]
+
+            # بررسی مقادیر NaN
+            if pd.isna(last_hourly['close']) or pd.isna(last_hourly['ema30']) or \
+               pd.isna(last_hourly['ema50']) or pd.isna(last_hourly['ema200']):
+                continue
+
+            # شرط ۲: EMA30 > EMA50 > EMA200 در ساعتی
+            if not (last_hourly['ema30'] > last_hourly['ema50'] > last_hourly['ema200']):
+                continue
+
+            # ========== فیلتر ۳: محاسبه ریسک ==========
+            # Risk% = (EMA200 - EMA50) / EMA200 * 100
+            # وقتی EMA50 > EMA200 باشد (روند صعودی)، این مقدار منفی می‌شود
+            # پس ما قدر مطلق یا فرمت دیگری نیاز داریم
+            # طبق درخواست شما: (ema 200 - ema 50)/ema 200 *100
+            # اگر EMA50 > EMA200 باشد => ریسک منفی => یعنی قیمت بالای EMA200 است
+            # برای روند صعودی، ما می‌خواهیم ریسک 0 تا 10 درصد باشد
+            # پس باید فرمول را به صورت |(EMA200 - EMA50) / EMA200 * 100| در نظر بگیریم
+            # یا اینکه شرط را تغییر دهیم به: ریسک بین -10 تا 0 (برای روند صعودی)
+
+            risk_pct = ((last_hourly['ema200'] - last_hourly['ema50']) / last_hourly['ema200']) * 100
+
+            # برای روند صعودی که EMA50 > EMA200 است، ریسک منفی خواهد بود
+            # ما می‌خواهیم فاصله EMA50 از EMA200 حداکثر 10٪ باشد
+            # پس قدر مطلق را بررسی می‌کنیم
+            risk_abs = abs(risk_pct)
+
+            # شرط ۳: ریسک بین 0 تا 10 درصد (قدر مطلق)
+            if not (MIN_RISK <= risk_abs <= MAX_RISK):
                 continue
 
             # ✅ همه فیلترها پاس شدند
@@ -243,11 +195,14 @@ def scan_market(pairs):
 
             results.append({
                 'symbol': symbol,
-                'price': last['close'],
-                'ema30': last['ema30'],
-                'ema50': last['ema50'],
-                'rsi': last['rsi'],
-                'rsi_ma': last['rsi_ma'],
+                'price': last_hourly['close'],
+                'daily_ema30': last_daily['ema30'],
+                'daily_ema50': last_daily['ema50'],
+                'hourly_ema30': last_hourly['ema30'],
+                'hourly_ema50': last_hourly['ema50'],
+                'hourly_ema200': last_hourly['ema200'],
+                'risk_pct': risk_pct,
+                'risk_abs': risk_abs,
                 'mkt_type': mkt_type,
                 'info': info
             })
@@ -259,6 +214,9 @@ def scan_market(pairs):
         # تأخیر کوتاه برای رعایت rate limit
         time.sleep(0.01)
 
+    # سورت بر اساس ریسک (قدر مطلق - کم به زیاد)
+    results.sort(key=lambda x: x['risk_abs'])
+
     return results
 
 # ================= MESSAGE BUILDER =================
@@ -267,18 +225,18 @@ def build_message(signals, total_scanned):
     now = datetime.now().strftime('%Y/%m/%d %H:%M:%S')
 
     header = (
-        f"🔍 <b>اسکنر XT | فیلتر ترکیبی</b>\n"
+        f"🔍 <b>اسکنر XT | فیلتر ترکیبی جدید</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📊 نمادهای بررسی شده: <code>{total_scanned}</code>\n"
         f"✅ عبور کرده: <code>{len(signals)}</code>\n"
         f"📋 شرایط:\n"
         f" ├─ ۱) EMA30 > EMA50 (روزانه)\n"
-        f" ├─ ۲) RSI > RSI_MA ({MA_TYPE} {MA_LENGTH})\n"
-        f" └─ ۳) 30 < RSI < 70\n"
+        f" ├─ ۲) EMA30 > EMA50 > EMA200 (ساعتی)\n"
+        f" └─ ۳) Risk% = (EMA200 - EMA50) / EMA200 * 100 => 0-10%\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
     )
 
-    footer = f"\n⏰ {now} 🇮🇷\n🤖 XT Scanner v1.0"
+    footer = f"\n⏰ {now} 🇮🇷\n🤖 XT Scanner v2.0"
 
     msgs = []
     body = ""
@@ -288,10 +246,9 @@ def build_message(signals, total_scanned):
         card = (
             f"{r}. {escape(s['symbol'])} [{s['mkt_type']}]\n"
             f"💰 Price: {s['price']:,.6f} USDT\n"
-            f"📈 EMA30: {s['ema30']:,.6f}\n"
-            f"📉 EMA50: {s['ema50']:,.6f}\n"
-            f"📊 RSI: {s['rsi']:.2f}\n"
-            f"📊 RSI_MA: {s['rsi_ma']:.2f}\n"
+            f"📈 Daily: EMA30={s['daily_ema30']:,.6f} > EMA50={s['daily_ema50']:,.6f}\n"
+            f"📈 Hourly: EMA30={s['hourly_ema30']:,.6f} > EMA50={s['hourly_ema50']:,.6f} > EMA200={s['hourly_ema200']:,.6f}\n"
+            f"⚠️ Risk: {s['risk_abs']:.2f}% (signed: {s['risk_pct']:+.2f}%)\n"
             f"─────────────────────\n"
         )
 
@@ -342,7 +299,7 @@ def send_telegram_message(text, chat_id=None):
 # ================= MAIN =================
 def run():
     """تابع اصلی اجرا"""
-    print("🚀 شروع اسکنر XT...")
+    print("🚀 شروع اسکنر XT با فیلترهای جدید...")
 
     # دریافت لیست جفت‌ارزها
     pairs = get_filtered_pairs()
@@ -356,13 +313,14 @@ def run():
     # نمایش نتایج در کنسول
     if results:
         print("\n" + "=" * 60)
-        print("🎯 نمادهای پیدا شده:")
+        print("🎯 نمادهای پیدا شده (مرتب شده بر اساس ریسک):")
         print("=" * 60)
         for i, r in enumerate(results, 1):
             print(f"\n{i}. {r['symbol']} [{r['mkt_type']}]")
             print(f"   Price: {r['price']:,.6f}")
-            print(f"   EMA30: {r['ema30']:,.6f} | EMA50: {r['ema50']:,.6f}")
-            print(f"   RSI: {r['rsi']:.2f} | RSI_MA: {r['rsi_ma']:.2f}")
+            print(f"   Daily: EMA30={r['daily_ema30']:,.6f} > EMA50={r['daily_ema50']:,.6f}")
+            print(f"   Hourly: EMA30={r['hourly_ema30']:,.6f} > EMA50={r['hourly_ema50']:,.6f} > EMA200={r['hourly_ema200']:,.6f}")
+            print(f"   ⚠️ Risk: {r['risk_abs']:.2f}% (signed: {r['risk_pct']:+.2f}%)")
         print("=" * 60)
 
     # ارسال به تلگرام
