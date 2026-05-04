@@ -1,5 +1,5 @@
 # Trigger.py
-# ✅ نسخه نهایی: سه فیلتر متوالی + محاسبه Risk% + نمایش نمادهای هر فیلتر
+# ✅ نسخه نهایی: سه فیلتر متوالی + محاسبه Risk%
 # فیلتر ۱ (روزانه): EMA30 >= EMA50
 # فیلتر ۲ (ساعتی): RSI(30) > RSI_MA(50)
 # فیلتر ۳ (ساعتی): RSI_MA بین 30 تا 70
@@ -25,10 +25,10 @@ SCAN_FUTURES = True
 
 # تایم‌فریم‌ها
 DAILY_TF = '1d'
-DAILY_LIMIT = 300
+DAILY_LIMIT = 100
 HOURLY_TF = '1h'
 HOURLY_LIMIT = 300
-MIN_BARS_REQUIRED = 300
+MIN_BARS_REQUIRED = 250
 
 # پارامترهای اندیکاتور
 RSI_LENGTH = 30
@@ -88,7 +88,7 @@ def load_market_caps():
             r = session.get(url, timeout=20)
             data = r.json()
             if not isinstance(data, list) or len(data) == 0: break
-            for coin in data:
+            for coin in 
                 sym = str(coin.get('symbol', '')).upper().strip()
                 mc = coin.get('market_cap')
                 if sym and isinstance(mc, (int, float)):
@@ -176,11 +176,6 @@ def run_scan(pairs):
     passed_filter1 = 0
     passed_filter2 = 0
     
-    # 📋 لیست‌های ذخیره نمادهای عبورکرده از هر فیلتر
-    passed_symbols_f1 = []
-    passed_symbols_f2 = []
-    passed_symbols_f3 = []
-    
     print(f"🔍 شروع اسکن سه مرحله‌ای...")
     print(f"📊 کل نمادها: {total}")
     
@@ -198,11 +193,10 @@ def run_scan(pairs):
             if not (pd.notna(last_daily['ema30']) and pd.notna(last_daily['ema50'])):
                 continue
                 
-            if last_daily['ema30'] > last_daily['ema50']:
+            if last_daily['ema30'] < last_daily['ema50']:
                 continue  # ❌ فیلتر ۱ رد شد
             
             passed_filter1 += 1
-            passed_symbols_f1.append(symbol)  # ✅ ذخیره نماد پاس‌شده از فیلتر ۱
             
             # ================= فیلتر ۲: ساعتی =================
             df_hourly = fetch_ohlcv(symbol, HOURLY_TF, HOURLY_LIMIT)
@@ -216,18 +210,15 @@ def run_scan(pairs):
             if not (pd.notna(last_hourly['rsi']) and pd.notna(last_hourly['rsi_ma'])):
                 continue
                 
-            if last_hourly['rsi'] >= last_hourly['rsi_ma']:
+            if last_hourly['rsi'] <= last_hourly['rsi_ma']:
                 continue  # ❌ فیلتر ۲ رد شد
             
             passed_filter2 += 1
-            passed_symbols_f2.append(symbol)  # ✅ ذخیره نماد پاس‌شده از فیلتر ۲
             
             # ================= فیلتر ۳: ساعتی =================
             # شرط: RSI_MA باید بین 30 تا 70 باشد
             if not (30 <= last_hourly['rsi_ma'] <= 70):
                 continue  # ❌ فیلتر ۳ رد شد
-            
-            passed_symbols_f3.append(symbol)  # ✅ ذخیره نماد پاس‌شده از فیلتر ۳
             
             # ================= محاسبه ریسک =================
             # Risk% = (Price - EMA200) / EMA200 * 100
@@ -257,36 +248,12 @@ def run_scan(pairs):
             if DEBUG_MODE: print(f"⚠️ Error {symbol}: {e}")
         time.sleep(0.02)
     
-    # ================= 📋 نمایش نمادهای عبورکرده از هر فیلتر =================
-    def show_passed(filter_name, symbols, limit=20):
-        """نمایش تعداد و نمونه‌ای از نمادهای پاس‌شده از یک فیلتر"""
-        count = len(symbols)
-        print(f"\n✅ {filter_name}: {count} نماد")
-        if count > 0:
-            display_list = symbols[:limit]
-            print(f"   ├─ نمونه‌ها ({min(limit, count)} مورد اول):")
-            # نمایش ۵ نماد در هر خط برای صرفه‌جویی در فضا
-            for i in range(0, len(display_list), 5):
-                chunk = display_list[i:i+5]
-                print(f"   │   {', '.join(chunk)}")
-            if count > limit:
-                print(f"   └─ و {count - limit} نماد دیگر...")
-    
-    print("\n" + "═"*60)
-    print("📊 گزارش عبور نمادها از فیلترها:")
-    print("═"*60)
-    show_passed("فیلتر ۱ (روزانه: EMA30 ≥ EMA50)", passed_symbols_f1)
-    show_passed("فیلتر ۲ (ساعتی: RSI(30) > RSI_MA(50))", passed_symbols_f2)
-    show_passed("فیلتر ۳ (ساعتی: RSI_MA بین 30 تا 70)", passed_symbols_f3)
-    print("═"*60 + "\n")
-    
     # ✅ سورت صعودی بر اساس Risk% (کم‌ریسک اول)
     results.sort(key=lambda x: x['risk_pct'] if x['risk_pct'] is not None else 999)
     
     print(f"✅ فیلتر ۱ (روزانه): {passed_filter1} نماد")
     print(f"✅ فیلتر ۲ (ساعتی RSI>MA): {passed_filter2} نماد")
     print(f"✅ فیلتر ۳ (ساعتی MA 30-70): {len(results)} نماد")
-    print(f"🎯 نمادهای نهایی برای ارسال: {len(results)}")
     
     return results, passed_filter1, passed_filter2
 
