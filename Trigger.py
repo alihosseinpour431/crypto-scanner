@@ -88,7 +88,7 @@ def load_market_caps():
             r = session.get(url, timeout=20)
             data = r.json()
             if not isinstance(data, list) or len(data) == 0: break
-            for coin in 
+            for coin in data:
                 sym = str(coin.get('symbol', '')).upper().strip()
                 mc = coin.get('market_cap')
                 if sym and isinstance(mc, (int, float)):
