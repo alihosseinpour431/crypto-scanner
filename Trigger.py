@@ -1,7 +1,4 @@
---- scanner_xt_new.py (原始)
 
-
-+++ scanner_xt_new.py (修改后)
 # scanner_xt_new.py
 # ✅ اسکنر بازار کریپتو - صرافی XT با فیلترهای جدید
 # فیلتر ۱: روزانه - EMA30 > EMA50
