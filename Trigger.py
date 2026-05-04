@@ -1,328 +1,354 @@
-# Trigger.py
-# ✅ نسخه نهایی و اصلاح‌شده: RSI on EMA (Pine Script Logic) + فیلترهای دقیق
+Trigger.py
+✅ نسخه نهایی: سه فیلتر متوالی + محاسبه Risk%
+فیلتر ۱ (روزانه): EMA30 >= EMA50
+فیلتر ۲ (ساعتی): RSI(30) > RSI_MA(50)  ← با الگوریتم دقیق Pine Script
+فیلتر ۳ (ساعتی): RSI_MA بین 30 تا 70
+ریسک: (Price - EMA200) / EMA200 * 100
+سورت: صعودی بر اساس Risk%
 
-import os, time, requests, ccxt, pandas as pd, pytz, jdatetime, numpy as np
+import os
+import time
+import requests
+import ccxt
+import pandas as pd
+import pytz
+import jdatetime
+import numpy as np
 from datetime import datetime
 from html import escape
 from tqdm.auto import tqdm
 
-# ================= CONFIG =================
-EXCHANGE_ID = 'xt'  # صرافی مورد نظر
+================= CONFIG =================
+EXCHANGE_ID = 'xt'
 SCAN_SPOT = True
 SCAN_FUTURES = True
-DAILY_TF, DAILY_LIMIT = '1d', 300
-HOURLY_TF, HOURLY_LIMIT = '1h', 300
+
+# تایم‌فریم‌ها
+DAILY_TF = '1d'
+DAILY_LIMIT = 100
+HOURLY_TF = '1h'
+HOURLY_LIMIT = 300
 MIN_BARS_REQUIRED = 250
 
-# ⚙️ تنظیمات دقیق اندیکاتورها (مطابق درخواست و عکس)
-# --- تنظیمات RSI ---
-RSI_LENGTH = 30              # طول دوره RSI
-RSI_SOURCE_EMA_LENGTH = 14   # طول EMA برای منبع محاسبه RSI (Source = EMA 14)
+# پارامترهای اندیکاتور (مطابق Pine Script)
+RSI_LENGTH = 30
+RSI_MA_LENGTH = 50
+RSI_SOURCE_TYPE = "EMA"  # EMA یا Close - مطابق تنظیمات TradingView
 
-# --- تنظیمات خط آبی (Smoothing) ---
-# طبق منطق ارسالی شما: خط آبی یک EMA 50 است که روی مقادیر RSI اعمال می‌شود
-BLUE_LINE_TYPE = "EMA"       
-BLUE_LINE_LENGTH = 50        
-
-# --- تنظیمات EMA200 (برای Risk) ---
-EMA200_LENGTH = 200
-
-# ================= ENV =================
+================= ENV & SECURITY =================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-if not TELEGRAM_BOT_TOKEN: raise ValueError("❌ TELEGRAM_BOT_TOKEN not set!")
-TELEGRAM_CHAT_IDS = [c.strip() for c in os.getenv("TELEGRAM_CHAT_ID", "487817626").split(",") if c.strip()]
+if not TELEGRAM_BOT_TOKEN:
+    raise ValueError("❌ TELEGRAM_BOT_TOKEN is not set in environment variables!")
+
+TELEGRAM_CHAT_IDS = [cid.strip() for cid in os.getenv("TELEGRAM_CHAT_ID", "487817626").split(",") if cid.strip()]
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
 COINGECKO_API = "https://api.coingecko.com/api/v3"
 
-# ================= EXCHANGE INIT =================
-exchange = getattr(ccxt, EXCHANGE_ID)({'enableRateLimit': True, 'timeout': 30000})
-exchange_markets = exchange.load_markets()
+================= EXCHANGE INIT =================
+try:
+    exchange = getattr(ccxt, EXCHANGE_ID)({
+        'enableRateLimit': True,
+        'timeout': 30000
+    })
+    exchange_markets = exchange.load_markets()
+except Exception as e:
+    print(f"❌ Critical Error initializing exchange: {e}")
+    exit(1)
 
-# ================= CACHE =================
+================= CACHE =================
 market_cap_cache = {}
 
-def send_telegram_message(text):
-    for cid in TELEGRAM_CHAT_IDS:
+================= TELEGRAM =================
+def send_telegram_message(text, chat_id=None):
+    targets = [chat_id] if chat_id else TELEGRAM_CHAT_IDS
+    for cid in targets:
+        cid = cid.strip()
+        if not cid: continue
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        payload = {
+            'chat_id': cid,
+            'text': text,
+            'parse_mode': 'HTML',
+            'disable_web_page_preview': True
+        }
         try:
-            r = requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                              json={'chat_id': cid, 'text': text, 'parse_mode': 'HTML', 'disable_web_page_preview': True},
-                              timeout=30)
-            if r.status_code == 200: print(f"✅ پیام به {cid} ارسال شد.")
-            else: print(f"⚠️ Telegram Error ({cid}): {r.status_code} | {r.text[:200]}")
-        except Exception as e: print(f"❌ Telegram Exception ({cid}): {e}")
+            r = requests.post(url, json=payload, timeout=30)
+            if DEBUG_MODE and r.status_code != 200:
+                print(f"⚠️ Telegram ({cid}): {r.status_code} | {r.text[:100]}")
+        except Exception as e:
+            print(f"❌ Telegram Error ({cid}): {e}")
 
+================= COINGECKO =================
 def load_market_caps():
     if market_cap_cache: return
-    print("📥 Loading Market Cap...")
-    sess = requests.Session()
+    print("📥 Loading Market Cap from CoinGecko ...")
+    session = requests.Session()
     for page in range(1, 11):
         try:
-            data = sess.get(f"{COINGECKO_API}/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=250&page={page}&sparkline=false").json()
-            if not isinstance(data, list) or not data: break
-            for c in data:
-                sym = str(c.get('symbol','')).upper()
-                mc = c.get('market_cap')
-                if sym and isinstance(mc, (int,float)): market_cap_cache[sym] = mc
+            url = f"{COINGECKO_API}/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=250&page={page}&sparkline=false"
+            r = session.get(url, timeout=20)
+            data = r.json()
+            if not isinstance(data, list) or len(data) == 0: break
+            for coin in data:
+                sym = str(coin.get('symbol', '')).upper().strip()
+                mc = coin.get('market_cap')
+                if sym and isinstance(mc, (int, float)):
+                    market_cap_cache[sym] = mc
             if len(data) < 250: break
             time.sleep(0.1)
         except: break
     print(f"✅ Market Cap loaded: {len(market_cap_cache)} symbols")
 
-def get_market_cap(symbol): return market_cap_cache.get(symbol.split('/')[0].upper())
+def get_market_cap(symbol):
+    base = symbol.split('/')[0].upper()
+    return market_cap_cache.get(base)
 
-def fmt_mc(v):
-    if v is None or (isinstance(v, float) and np.isnan(v)): return "🔸 N/A"
-    v = float(v)
+def fmt_mc(value):
+    if value is None or np.isnan(value): return "🔸 N/A"
+    v = float(value)
     if v >= 1e12: return f"💎 ${v/1e12:.2f}T"
-    if v >= 1e9: return f" ${v/1e9:.2f}B"
+    if v >= 1e9: return f"💎 ${v/1e9:.2f}B"
     if v >= 1e6: return f"💎 ${v/1e6:.2f}M"
     return f"💎 ${v:,.0f}"
 
+================= DEDUPLICATION =================
 def get_filtered_pairs():
-    smap = {}
-    for sym, inf in exchange_markets.items():
-        if not inf.get('active') or inf.get('quote') != 'USDT': continue
-        spot = inf.get('spot', False)
-        fut = inf.get('future', False) or inf.get('swap', False)
-        if (SCAN_SPOT and spot) or (SCAN_FUTURES and fut):
-            base = sym.split('/')[0].upper()
-            if base not in smap: smap[base] = (sym, inf, spot)
-            elif spot and not smap[base][2]: smap[base] = (sym, inf, True)
-    return [(s, i) for s, i, _ in smap.values()]
+    symbol_map = {}
+    for symbol, info in exchange_markets.items():
+        if not info.get('active') or info.get('quote') != 'USDT': continue
+        is_spot = info.get('spot', False)
+        is_future = info.get('future', False) or info.get('swap', False)
+        if (SCAN_SPOT and is_spot) or (SCAN_FUTURES and is_future):
+            base = symbol.split('/')[0].upper()
+            if base not in symbol_map:
+                symbol_map[base] = (symbol, info, is_spot)
+            elif is_spot and not symbol_map[base][2]:
+                symbol_map[base] = (symbol, info, True)
+    return [(sym, inf) for sym, inf, _ in symbol_map.values()]
 
-def fetch_ohlcv(symbol, tf, limit):
+================= DATA & INDICATORS =================
+def fetch_ohlcv(symbol, timeframe, limit):
     try:
-        data = exchange.fetch_ohlcv(symbol, tf, limit)
+        data = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
         if len(data) < MIN_BARS_REQUIRED: return None
-        df = pd.DataFrame(data, columns=['ts','o','h','l','c','v'])
+        df = pd.DataFrame(data, columns=['ts', 'o', 'h', 'l', 'c', 'v'])
         df['ts'] = pd.to_datetime(df['ts'], unit='ms', utc=True)
         return df
-    except: return None
+    except Exception as e:
+        if DEBUG_MODE: print(f"⚠️ Fetch error {symbol}: {e}")
+        return None
 
 def calc_daily_ema(df):
+    """محاسبه EMA30 و EMA50 برای فیلتر روزانه"""
     df = df.copy()
     df['ema30'] = df['c'].ewm(span=30, adjust=False).mean()
     df['ema50'] = df['c'].ewm(span=50, adjust=False).mean()
     return df
 
-# =========================================================
-# FUNCTIONS FOR EXACT PINE SCRIPT LOGIC
-# =========================================================
-
+# 🔹 تابع کمکی: Wilder's RMA (مطابق ta.rma در Pine Script)
 def pine_rma(series, length):
     """
-    محاسبه RMA به سبک Wilder (دقیقاً مشابه ta.rma در Pine Script)
-    فرمول: alpha = 1/length
+    محاسبه Moving Average با روش Wilder (RMA)
+    فرمول: alpha = 1/length → ewm(alpha=alpha, adjust=False)
     """
     alpha = 1.0 / length
     return series.ewm(alpha=alpha, adjust=False).mean()
 
 def calc_hourly_indicators(df):
     """
-    محاسبه دقیق اندیکاتورها طبق منطق ارسالی:
-    1. Source = EMA(14) of Close
-    2. RSI(30) calculated on Source using Wilder's RMA
-    3. BlueLine = EMA(50) applied on the RSI values
+    محاسبه دقیق اندیکاتورهای ساعتی منطبق بر Pine Script:
+    - RSI(30) با منبع EMA و smoothing Wilder's RMA
+    - RSI_MA(50) با نوع EMA روی خروجی RSI
+    - EMA200 (برای محاسبه ریسک)
     """
     df = df.copy()
     
-    # --- Step 1: Calculate Source (EMA 14) ---
-    # طبق درخواست: منبع RSI باید EMA باشد، نه قیمت بسته شدن
-    rsi_source = df['c'].ewm(span=RSI_SOURCE_EMA_LENGTH, adjust=False).mean()
+    # 🔹 مرحله ۱: تعیین منبع RSI (EMA یا Close)
+    if RSI_SOURCE_TYPE == "EMA":
+        rsi_source = df['c'].ewm(span=RSI_LENGTH, adjust=False).mean()
+    else:
+        rsi_source = df['c']
     
-    # --- Step 2: Calculate RSI (Length 30) on Source using Wilder's RMA ---
+    # 🔹 مرحله ۲: محاسبه تغییرات (ta.change در Pine)
     change = rsi_source.diff()
     
-    # محاسبه Gain و Loss
+    # 🔹 مرحله ۳: جداسازی gains و losses
     up = np.maximum(change, 0.0)
     down = np.maximum(-change, 0.0)
+    up = pd.Series(up, index=df.index)
+    down = pd.Series(down, index=df.index)
     
-    # تبدیل به Series برای اعمال RMA
-    up_series = pd.Series(up, index=df.index)
-    down_series = pd.Series(down, index=df.index)
+    # 🔹 مرحله ۴: اعمال Wilder's RMA برای میانگین‌گیری
+    avg_up = pine_rma(up, RSI_LENGTH)
+    avg_down = pine_rma(down, RSI_LENGTH)
     
-    # اعمال Wilder's RMA
-    avg_up = pine_rma(up_series, RSI_LENGTH)
-    avg_down = pine_rma(down_series, RSI_LENGTH)
+    # 🔹 مرحله ۵: محاسبه RS و RSI نهایی (دقیقاً مطابق Pine Script)
+    rs = avg_up / avg_down
+    rsi = np.where(
+        avg_down == 0,
+        100,
+        np.where(avg_up == 0, 0, 100 - (100 / (1 + rs)))
+    )
+    df['rsi'] = pd.Series(rsi, index=df.index)
     
-    # محاسبه نهایی RSI
-    rs = avg_up / avg_down.replace(0, np.nan)
-    rsi_values = 100 - (100 / (1 + rs))
-    rsi_values = rsi_values.fillna(100) # هندل کردن حالت‌های خاص
+    # 🔹 مرحله ۶: محاسبه RSI_MA با نوع EMA و طول 50
+    df['rsi_ma'] = df['rsi'].ewm(span=RSI_MA_LENGTH, adjust=False).mean()
     
-    df['rsi'] = rsi_values  # این همان خط بنفش (Purple) است
-    
-    # --- Step 3: Calculate Blue Line (EMA 50 on RSI) ---
-    # طبق منطق ارسالی: خط آبی یک EMA است که روی خودِ RSI اعمال می‌شود
-    if BLUE_LINE_TYPE == "EMA":
-        df['rsi_ma'] = df['rsi'].ewm(span=BLUE_LINE_LENGTH, adjust=False).mean()
-    elif BLUE_LINE_TYPE == "SMA":
-        df['rsi_ma'] = df['rsi'].rolling(BLUE_LINE_LENGTH).mean()
-    else:
-        # پیش‌فرض EMA
-        df['rsi_ma'] = df['rsi'].ewm(span=BLUE_LINE_LENGTH, adjust=False).mean()
-        
-    # --- Step 4: Calculate Risk (Distance from EMA 200) ---
-    df['ema200'] = df['c'].ewm(span=EMA200_LENGTH, adjust=False).mean()
-    df['risk'] = (df['c'] - df['ema200']) / df['ema200'] * 100
+    # 🔹 مرحله ۷: محاسبه EMA200 برای فرمول ریسک (بدون تغییر)
+    df['ema200'] = df['c'].ewm(span=200, adjust=False).mean()
     
     return df
 
-def scan_with_three_filters(pairs):
+================= MAIN SCAN LOGIC =================
+def run_scan(pairs):
     results = []
     total = len(pairs)
-    d_pass = r_pass = rsi_pass = 0
-    
-    print(f"🔍 شروع اسکن روی {total} نماد...")
-    
-    for symbol, info in tqdm(pairs, desc="Scanning", total=total):
+    passed_filter1 = 0
+    passed_filter2 = 0
+    print(f"🔍 شروع اسکن سه مرحله‌ای... ")
+    print(f"📊 کل نمادها: {total} ")
+
+    for idx, (symbol, info) in enumerate(tqdm(pairs, desc="Scanning ", total=total), 1):
         try:
-            # --- 🛡️ فیلتر ۱: روزانه (EMA30 > EMA50) ---
-            df_d = fetch_ohlcv(symbol, DAILY_TF, DAILY_LIMIT)
-            if df_d is None: continue
-            df_d = calc_daily_ema(df_d)
-            last_d = df_d.iloc[-1]
+            # ================= فیلتر ۱: روزانه =================
+            df_daily = fetch_ohlcv(symbol, DAILY_TF, DAILY_LIMIT)
+            if df_daily is None: 
+                continue
             
-            # چک کردن NaN و شرط صعودی بودن
-            if not (pd.notna(last_d['ema30']) and pd.notna(last_d['ema50']) and last_d['ema30'] > last_d['ema50']):
+            df_daily = calc_daily_ema(df_daily)
+            last_daily = df_daily.iloc[-1]
+            
+            # شرط: EMA30 >= EMA50 در تایم روزانه
+            if not (pd.notna(last_daily['ema30']) and pd.notna(last_daily['ema50'])):
                 continue
-            d_pass += 1
-
-            # --- 🛡️ فیلتر ۲ و ۳: ساعتی (منطق دقیق Pine Script) ---
-            df_h = fetch_ohlcv(symbol, HOURLY_TF, HOURLY_LIMIT)
-            if df_h is None: continue
-            df_h = calc_hourly_indicators(df_h)
-            last_h = df_h.iloc[-1]
-
-            # استخراج مقادیر نهایی
-            rsi_val = last_h['rsi']      # خط بنفش (Purple)
-            rsi_ma_val = last_h['rsi_ma'] # خط آبی (Blue)
-
-            # 🛡️ فیلتر ۲: خط بنفش > خط آبی
-            # اگر هر کدام NaN بودند، رد کن
-            if not (pd.notna(rsi_val) and pd.notna(rsi_ma_val) and rsi_val > rsi_ma_val):
+                
+            if last_daily['ema30'] < last_daily['ema50']:
+                continue  # ❌ فیلتر ۱ رد شد
+            
+            passed_filter1 += 1
+            
+            # ================= فیلتر ۲: ساعتی =================
+            df_hourly = fetch_ohlcv(symbol, HOURLY_TF, HOURLY_LIMIT)
+            if df_hourly is None:
                 continue
-            r_pass += 1
-
-            # 🛡️ فیلتر ۳: محدوده امن (30 < RSI < 70)
-            # طبق درخواست: فقط آن‌هایی که RSI (خط بنفش) بین ۳۰ و ۷۰ است نمایش داده شود
-            if not (pd.notna(rsi_val) and 30 < rsi_val < 70):
+            
+            df_hourly = calc_hourly_indicators(df_hourly)
+            last_hourly = df_hourly.iloc[-1]
+            
+            # شرط: RSI > RSI_MA در تایم ساعتی
+            if not (pd.notna(last_hourly['rsi']) and pd.notna(last_hourly['rsi_ma'])):
                 continue
-            rsi_pass += 1
-
-            # محاسبه Risk برای مرتب‌سازی
-            risk_val = last_h['risk'] if pd.notna(last_h['risk']) else 0.0
-
-            # تعیین نوع بازار
+                
+            if last_hourly['rsi'] <= last_hourly['rsi_ma']:
+                continue  # ❌ فیلتر ۲ رد شد
+            
+            passed_filter2 += 1
+            
+            # ================= فیلتر ۳: ساعتی =================
+            # شرط: RSI_MA باید بین 30 تا 70 باشد
+            if not (30 <= last_hourly['rsi_ma'] <= 70):
+                continue  # ❌ فیلتر ۳ رد شد
+            
+            # ================= محاسبه ریسک =================
+            # Risk% = (Price - EMA200) / EMA200 * 100
+            if pd.notna(last_hourly['ema200']) and last_hourly['ema200'] != 0:
+                risk_pct = ((last_hourly['c'] - last_hourly['ema200']) / last_hourly['ema200']) * 100
+            else:
+                continue  # نمی‌توان ریسک را محاسبه کرد
+            
+            # ✅ هر سه فیلتر پاس شدند
             mkt = 'F' if (info.get('future') or info.get('swap')) else 'S'
-            
             results.append({
                 'symbol': symbol,
-                'price': last_h['c'],
-                'rsi': rsi_val,          # Purple
-                'rsi_ma': rsi_ma_val,    # Blue
-                'risk': risk_val,
+                'price': last_hourly['c'],
+                'daily_ema30': last_daily['ema30'],
+                'daily_ema50': last_daily['ema50'],
+                'rsi': last_hourly['rsi'],
+                'rsi_ma': last_hourly['rsi_ma'],
+                'rsi_diff': last_hourly['rsi'] - last_hourly['rsi_ma'],
+                'ema200': last_hourly['ema200'],
+                'risk_pct': risk_pct,
                 'mc': get_market_cap(symbol),
                 'mkt_type': mkt,
                 'info': info
             })
-        except Exception as e:
+            
+        except Exception as e: 
             if DEBUG_MODE: print(f"⚠️ Error {symbol}: {e}")
-        time.sleep(0.02) # جلوگیری از بن شدن IP
+        time.sleep(0.02)
 
-    final_pass = len(results)
-    
-    # مرتب‌سازی صعودی بر اساس Risk (کمترین ریسک اول)
-    results.sort(key=lambda x: x['risk'])
+    # ✅ سورت صعودی بر اساس Risk% (کم‌ریسک اول)
+    results.sort(key=lambda x: x['risk_pct'] if x['risk_pct'] is not None else 999)
 
-    print("\n" + "="*50)
-    print(f"📊 گزارش فیلترها:")
-    print(f"   کل نمادها: {total}")
-    print(f"   ✅ فیلتر ۱ (Daily EMA): {d_pass}")
-    print(f"   ✅ فیلتر ۲ (Purple > Blue): {r_pass}")
-    print(f"   ✅ فیلتر ۳ (30 < RSI < 70): {rsi_pass}")
-    print(f"   🎯 خروجی نهایی: {final_pass}")
-    print("="*50)
+    print(f"✅ فیلتر ۱ (روزانه): {passed_filter1} نماد ")
+    print(f"✅ فیلتر ۲ (ساعتی RSI >MA): {passed_filter2} نماد ")
+    print(f"✅ فیلتر ۳ (ساعتی MA 30-70): {len(results)} نماد ")
 
-    stats = {'daily': d_pass, 'rsi_cross': r_pass, 'rsi_range': rsi_pass, 'final': final_pass}
-    return results, stats
+    return results, passed_filter1, passed_filter2
 
-def build_message(signals, total, d_pass, r_pass, rsi_pass, final_pass):
+================= MESSAGE BUILDERS =================
+def build_message(signals, total_pairs, passed_f1, passed_f2):
     now = jdatetime.datetime.now(pytz.timezone('Asia/Tehran')).strftime('%Y/%m/%d %H:%M:%S')
-    
     header = (
-        f"🎯 <b>گزارش اسکن | RSI on EMA (Exact Logic)</b>\n"
+        f"🚀 <b>گزارش اسکن سه مرحله‌ای + Risk% </b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📊 کل نمادها: <code>{total}</code>\n"
-        f"├─ ✅ فیلتر ۱ (Daily EMA30&gt;50): <code>{d_pass}</code>\n"
-        f"├─ ✅ فیلتر ۲ (Purple&gt;Blue): <code>{r_pass}</code>\n"
-        f"├─ ✅ فیلتر ۳ (30 &lt; RSI &lt; 70): <code>{rsi_pass}</code>\n"
-        f"└─ 🎯 سیگنال نهایی: <code>{final_pass}</code>\n"
+        f"📊 کل نمادها: <code>{total_pairs}</code>\n"
+        f"✅ فیلتر ۱ (روزانه EMA30≥EMA50): <code>{passed_f1}</code>\n"
+        f"✅ فیلتر ۲ (ساعتی RSI >RSI_MA): <code>{passed_f2}</code>\n"
+        f"✅ فیلتر ۳ (ساعتی RSI_MA 30-70): <code>{len(signals)}</code>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
-        f" ⚙️ تنظیمات محاسباتی:\n"
-        f" ├─ منبع RSI: EMA(14) قیمت\n"
-        f" ├─ RSI Length: 30 (Wilder's RMA)\n"
-        f" ├─ خط آبی: EMA(50) روی RSI\n"
-        f" └─ مرتب‌سازی: بر اساس کمترین Risk (فاصله از EMA200)\n"
+        f"📋 شرایط:\n"
+        f" ├─ ۱. روزانه: EMA30 >= EMA50\n"
+        f" ├─ ۲. ساعتی: RSI(30) > EMA(50) روی RSI ← الگوریتم Pine Script\n"
+        f" ├─ ۳. ساعتی: RSI_MA بین 30 تا 70\n"
+        f" └─ 📊 مرتب شده بر اساس Risk% (کم به زیاد)\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
     )
-    footer = f"\n⏰ {now} 🇮\n🤖 AlphaScanner v6.0 (PineLogic)"
-
+    footer = f"\n⏰ {now} 🇮🇷\n🤖 AlphaScanner v5.1-Pine "
     msgs = []
-    body = ""
+    body = " "
     MAX = 4000
-    
-    if signals:
-        for r, s in enumerate(signals, 1):
-            risk_str = f"{s['risk']:+.2f}%" if pd.notna(s['risk']) else "N/A"
+
+    for r, s in enumerate(signals, 1):
+        risk_color = "🟢 " if s['risk_pct'] < 10 else "🟡 " if s['risk_pct'] < 30 else "🔴 "
+        card = (
+            f"{r}. {escape(s['symbol'])} [{s['mkt_type']}]\n"
+            f"💰 {s['price']:,.4f} USDT\n"
+            f"📊 RSI: <b>{s['rsi']:.2f}</b> | MA: {s['rsi_ma']:.2f}\n"
+            f"📈 RSI Diff: +{s['rsi_diff']:.2f}\n"
+            f" EMA200: {s['ema200']:,.4f}\n"
+            f"{risk_color} Risk: {s['risk_pct']:+.2f}%\n"
+            f"💎 MC: {fmt_mc(s['mc'])}\n"
+            f"─────────────────────\n"
+        )
+        if len(header) + len(body) + len(card) + len(footer) > MAX - 100:
+            msgs.append(header + body + footer)
+            body = card
+        else:
+            body += card
             
-            # نمایش دقیق مقادیر برای اطمینان کاربر
-            card = (
-                f"{r}. {escape(s['symbol'])} [{s['mkt_type']}]\n"
-                f"💰 Price: {s['price']:,.4f} USDT\n"
-                f"🟣 Purple (RSI): <b>{s['rsi']:.2f}</b>\n"
-                f"🔵 Blue (EMA50): {s['rsi_ma']:.2f}\n"
-                f"⚠️ Risk: {risk_str}\n"
-                f"💎 MC: {fmt_mc(s['mc'])}\n"
-                f"─────────────────────\n"
-            )
-            if len(header)+len(body)+len(card)+len(footer) > MAX-100:
-                msgs.append(header+body+footer)
-                body = card
-            else:
-                body += card
-        if body.strip(): msgs.append(header+body+footer)
-    else:
-        msgs.append(f"{header}❌ هیچ نمادی هر سه فیلتر را پاس نکرد.{footer}")
-    
+    if body.strip(): msgs.append(header + body + footer)
+    if not msgs: msgs.append(f"{header}❌ هیچ نمادی هر سه فیلتر را پاس نکرد.{footer}")
     return msgs
 
+================= MAIN =================
 def run():
-    print("🚀 شروع اسکن...")
+    print("🚀 شروع اسکن سه مرحله‌ای...")
     load_market_caps()
     pairs = get_filtered_pairs()
     print(f"📊 کل نمادهای فعال: {len(pairs)}")
+    # اجرای اسکن
+    final_results, passed_f1, passed_f2 = run_scan(pairs)
 
-    results, stats = scan_with_three_filters(pairs)
-    print(f"✅ اسکن پایان یافت: {stats['final']} نماد")
-
-    msgs = build_message(results, len(pairs), stats['daily'], stats['rsi_cross'], stats['rsi_range'], stats['final'])
-    print(f"📨 تعداد پیام‌ها: {len(msgs)}")
-    for msg in msgs:
+    # ارسال پیام
+    for msg in build_message(final_results, len(pairs), passed_f1, passed_f2):
         send_telegram_message(msg)
         time.sleep(0.3)
+        
     print("✅ پایان کامل اسکن")
-    return results
 
+================= RUN =================
 if __name__ == "__main__":
-    start_msg = (
-        "🤖 <b>اسکن RSI on EMA (Pine Logic) شروع شد</b>\n"
-        "📅 روزانه: EMA30 &gt; EMA50\n"
-        "⏰ ساعتی: RSI(30) on EMA(14) &gt; EMA(50)\n"
-        "⚖️ محدوده RSI: 30 &lt; RSI &lt; 70\n"
-        "📉 متد: Wilder's RMA\n"
-        "📏 مرتب‌سازی بر اساس Risk"
-    )
-    send_telegram_message(start_msg)
+    send_telegram_message("🤖 <b>اسکن سه مرحله‌ای شروع شد </b>\n1️⃣ روزانه: EMA30 ≥ EMA50\n2️⃣ ساعتی: RSI(30) > EMA(50) ← Pine Script Exact\n3️⃣ ساعتی: RSI_MA 30-70\n📊 سورت بر اساس Risk% ")
     run()
-    send_telegram_message("✅ <b>اسکن با موفقیت پایان یافت</b>")
+    send_telegram_message("✅ <b>اسکن با موفقیت پایان یافت </b> ")
