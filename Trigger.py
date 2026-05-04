@@ -1,4 +1,4 @@
-# Trigger.py
+# scanner.py
 # ✅ نسخه نهایی بهینه‌شده برای GitHub Actions - منطق سه فیلتر
 # فیلتر ۱: روزانه - EMA30 > EMA50
 # فیلتر ۲: ساعتی - RSI(30) > EMA50(RSI)
@@ -178,16 +178,24 @@ def scan_with_three_filters(pairs):
     1️⃣ روزانه: EMA30 > EMA50
     2️⃣ ساعتی: RSI > RSI_MA
     3️⃣ کنترل اشباع: 30 < RSI_MA < 70
+    همچنین خروجی هر مرحله فیلتر در کنسول (و در صورت DEBUG_MODE وضعیت هر نماد) نمایش داده می‌شود.
     """
     results = []
     total = len(pairs)
+    
+    # شمارنده‌های فیلتر
+    daily_passed = 0
+    rsi_passed = 0
+    
     print(f"🔍 شروع اسکن با ۳ فیلتر روی {total} نماد...")
     
     for idx, (symbol, info) in enumerate(tqdm(pairs, desc="Scanning", total=total), 1):
         try:
             # 🔹 فیلتر ۱: تایم روزانه - EMA30 > EMA50
             df_d = fetch_ohlcv(symbol, DAILY_TF, DAILY_LIMIT)
-            if df_d is None: continue
+            if df_d is None:
+                if DEBUG_MODE: print(f"🔸 {symbol}: DAILY ⚠️ (داده ناقص)")
+                continue
             df_d = calc_daily_ema(df_d)
             last_d = df_d.iloc[-1]
             
@@ -196,29 +204,51 @@ def scan_with_three_filters(pairs):
                 pd.notna(last_d['ema50']) and 
                 last_d['ema30'] > last_d['ema50']
             )
-            if not cond_daily: continue  # ❌ رد شد از فیلتر روزانه
+            
+            # نمایش وضعیت فیلتر ۱
+            if DEBUG_MODE:
+                print(f"🔸 {symbol}: DAILY {'✅' if cond_daily else '❌'}", end=" ")
+            
+            if not cond_daily:
+                if DEBUG_MODE: print()   # خط جدید
+                continue   # ❌ رد شد از فیلتر روزانه
+            daily_passed += 1
             
             # 🔹 فیلتر ۲ و ۳: تایم ساعتی - RSI و RSI_MA
             df_h = fetch_ohlcv(symbol, HOURLY_TF, HOURLY_LIMIT)
-            if df_h is None: continue
+            if df_h is None:
+                if DEBUG_MODE: print("HOURLY ⚠️ (داده ناقص)")
+                continue
             df_h = calc_hourly_rsi(df_h)
             last_h = df_h.iloc[-1]
             
-            # فیلتر ۲: RSI > RSI_MA (قدرت گرفتن مومنتوم)
+            # فیلتر ۲: RSI > RSI_MA
             cond_rsi = (
                 pd.notna(last_h['rsi']) and 
                 pd.notna(last_h['rsi_ma']) and 
                 last_h['rsi'] > last_h['rsi_ma']
             )
-            if not cond_rsi: continue  # ❌ رد شد از فیلتر مومنتوم
             
-            # فیلتر ۳: 30 < RSI_MA < 70 (ناحیه متعادل، بدون اشباع)
+            if DEBUG_MODE:
+                print(f"RSI {'✅' if cond_rsi else '❌'}", end=" ")
+            
+            if not cond_rsi:
+                if DEBUG_MODE: print()   # خط جدید
+                continue   # ❌ رد شد از فیلتر مومنتوم
+            rsi_passed += 1
+            
+            # فیلتر ۳: 30 < RSI_MA < 70
             rsi_ma_val = last_h['rsi_ma']
             cond_balance = (
                 pd.notna(rsi_ma_val) and 
                 30 < rsi_ma_val < 70
             )
-            if not cond_balance: continue  # ❌ رد شد از فیلتر اشباع
+            
+            if DEBUG_MODE:
+                print(f"BAL {'✅' if cond_balance else '❌'}")
+            
+            if not cond_balance:
+                continue   # ❌ رد شد از فیلتر اشباع
             
             # ✅ همه فیلترها پاس شدند!
             mkt = 'F' if (info.get('future') or info.get('swap')) else 'S'
@@ -236,17 +266,37 @@ def scan_with_three_filters(pairs):
             if DEBUG_MODE: print(f"⚠️ Error {symbol}: {e}")
         time.sleep(0.02)  # جلوگیری از ریت‌لیمیت
     
-    return results
+    final_passed = len(results)
+    
+    # 📊 گزارش نهایی فیلترها در کنسول
+    print("\n" + "="*50)
+    print(f"📊 نتیجه فیلترها:")
+    print(f"   کل نمادهای بررسی‌شده: {total}")
+    print(f"   ✅ فیلتر ۱ (EMA روزانه) عبور کرده: {daily_passed}")
+    print(f"   ✅ فیلتر ۲ (RSI ساعتی) عبور کرده: {rsi_passed}")
+    print(f"   ✅ فیلتر ۳ (تعادل اشباع) عبور کرده: {final_passed} (سیگنال نهایی)")
+    print("="*50)
+    
+    # آمار را به همراه نتایج برمی‌گردانیم
+    stats = {
+        'daily_passed': daily_passed,
+        'rsi_passed': rsi_passed,
+        'final_passed': final_passed
+    }
+    return results, stats
 
 # ================= MESSAGE BUILDER =================
-def build_final_message(signals, total_scanned):
+def build_final_message(signals, total_scanned, daily_passed, rsi_passed, final_passed):
     now = jdatetime.datetime.now(pytz.timezone('Asia/Tehran')).strftime('%Y/%m/%d %H:%M:%S')
     
     header = (
         f"🎯 <b>گزارش نهایی اسکن | ۳ فیلتر هوشمند</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📊 نمادهای بررسی شده: <code>{total_scanned}</code>\n"
-        f"✅ سیگنال‌های یافت شده: <code>{len(signals)}</code>\n"
+        f"├─ ✅ فیلتر ۱ (EMA روزانه): <code>{daily_passed}</code>\n"
+        f"├─ ✅ فیلتر ۲ (RSI ساعتی): <code>{rsi_passed}</code>\n"
+        f"└─ ✅ فیلتر ۳ (تعادل اشباع): <code>{final_passed}</code>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📋 شرایط فیلترها:\n"
         f" ├─ 1️⃣ روزانه: EMA30 {'>'} EMA50 ✅\n"
         f" ├─ 2️⃣ ساعتی: RSI(30) {'>'} RSI_MA ✅\n"
@@ -259,25 +309,23 @@ def build_final_message(signals, total_scanned):
     body = ""
     MAX = 4000  # محدودیت تلگرام
     
-    for r, s in enumerate(signals, 1):
-        card = (
-            f"{r}. {escape(s['symbol'])} [{s['mkt_type']}]\n"
-            f"💰 {s['price']:,.4f} USDT\n"
-            f"📊 RSI: {s['rsi']:.1f} | RSI_MA: {s['rsi_ma']:.1f}\n"
-            f"💎 MC: {fmt_mc(s['mc'])}\n"
-            f"─────────────────────\n"
-        )
-        # مدیریت طول پیام برای جلوگیری از خطای تلگرام
-        if len(header) + len(body) + len(card) + len(footer) > MAX - 100:
+    if signals:
+        for r, s in enumerate(signals, 1):
+            card = (
+                f"{r}. {escape(s['symbol'])} [{s['mkt_type']}]\n"
+                f"💰 {s['price']:,.4f} USDT\n"
+                f"📊 RSI: {s['rsi']:.1f} | RSI_MA: {s['rsi_ma']:.1f}\n"
+                f"💎 MC: {fmt_mc(s['mc'])}\n"
+                f"─────────────────────\n"
+            )
+            if len(header) + len(body) + len(card) + len(footer) > MAX - 100:
+                msgs.append(header + body + footer)
+                body = card
+            else:
+                body += card
+        if body.strip():
             msgs.append(header + body + footer)
-            body = card
-        else:
-            body += card
-    
-    if body.strip():
-        msgs.append(header + body + footer)
-    
-    if not msgs:
+    else:
         msgs.append(f"{header}❌ هیچ نمادی هر سه فیلتر را پاس نکرد.{footer}")
     
     return msgs
@@ -289,12 +337,15 @@ def run():
     pairs = get_filtered_pairs()
     print(f"📊 کل نمادهای فعال (بدون تکرار): {len(pairs)}")
     
-    # 🔹 اجرای اسکن با سه فیلتر
-    results = scan_with_three_filters(pairs)
-    print(f"✅ اسکن پایان یافت: {len(results)} نماد انتخاب شدند")
+    # 🔹 اجرای اسکن با سه فیلتر (دریافت نتایج و آمار)
+    results, stats = scan_with_three_filters(pairs)
+    print(f"✅ اسکن پایان یافت: {stats['final_passed']} نماد انتخاب شدند")
     
     # 🔹 ارسال گزارش به تلگرام
-    for msg in build_final_message(results, len(pairs)):
+    for msg in build_final_message(results, len(pairs), 
+                                   stats['daily_passed'], 
+                                   stats['rsi_passed'], 
+                                   stats['final_passed']):
         send_telegram_message(msg)
         time.sleep(0.3)
     
