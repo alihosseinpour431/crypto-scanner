@@ -1,4 +1,4 @@
-# scanner.py
+# Trigger.py
 # ✅ نسخه نهایی بهینه‌شده برای GitHub Actions - منطق سه فیلتر
 # فیلتر ۱: روزانه - EMA30 > EMA50
 # فیلتر ۲: ساعتی - RSI(30) > EMA50(RSI)
