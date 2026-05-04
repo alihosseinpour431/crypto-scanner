@@ -22,12 +22,12 @@ SCAN_FUTURES = True
 
 # تایم‌فریم‌ها و حداقل کندل
 DAILY_TF = '1d'
-DAILY_LIMIT = 230
+DAILY_LIMIT = 300
 HOURLY_TF = '1h'
 HOURLY_LIMIT = 300
 TF_30M = '30m'
-LIMIT_30M = 250
-MIN_BARS_REQUIRED = 200
+LIMIT_30M = 300
+MIN_BARS_REQUIRED = 250
 
 # پارامترهای اندیکاتور
 RSI_LENGTH = 30
@@ -147,8 +147,10 @@ def calc_indicators(df):
     delta = df['c'].diff()
     gain = delta.where(delta > 0, 0).rolling(RSI_LENGTH).mean()
     loss = -delta.where(delta < 0, 0).rolling(RSI_LENGTH).mean()
-    rs = gain / loss.replace(0, np.nan)
+    
+    rs = gain/loss.replace(0, np.nan)
     df['rsi'] = 100 - (100 / (1 + rs))
+    df['rsi'] = df['rsi'].fillna(100)  # وقتی loss صفر است، RSI باید 100 باشد
     
     direction = np.sign(df['c'].diff()).fillna(0)
     df['obv'] = (direction * df['v']).cumsum()
