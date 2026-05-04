@@ -1,10 +1,10 @@
-Trigger.py
-✅ نسخه نهایی: سه فیلتر متوالی + محاسبه Risk%
-فیلتر ۱ (روزانه): EMA30 >= EMA50
-فیلتر ۲ (ساعتی): RSI(30) > RSI_MA(50)  ← با الگوریتم دقیق Pine Script
-فیلتر ۳ (ساعتی): RSI_MA بین 30 تا 70
-ریسک: (Price - EMA200) / EMA200 * 100
-سورت: صعودی بر اساس Risk%
+# Trigger.py
+# ✅ نسخه نهایی: سه فیلتر متوالی + محاسبه Risk%
+# فیلتر ۱ (روزانه): EMA30 >= EMA50
+# فیلتر ۲ (ساعتی): RSI(30) > RSI_MA(50)  ← با الگوریتم دقیق Pine Script
+# فیلتر ۳ (ساعتی): RSI_MA بین 30 تا 70
+# ریسک: (Price - EMA200) / EMA200 * 100
+# سورت: صعودی بر اساس Risk%
 
 import os
 import time
@@ -18,7 +18,7 @@ from datetime import datetime
 from html import escape
 from tqdm.auto import tqdm
 
-================= CONFIG =================
+# ================= CONFIG =================
 EXCHANGE_ID = 'xt'
 SCAN_SPOT = True
 SCAN_FUTURES = True
@@ -35,7 +35,7 @@ RSI_LENGTH = 30
 RSI_MA_LENGTH = 50
 RSI_SOURCE_TYPE = "EMA"  # EMA یا Close - مطابق تنظیمات TradingView
 
-================= ENV & SECURITY =================
+# ================= ENV & SECURITY =================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 if not TELEGRAM_BOT_TOKEN:
     raise ValueError("❌ TELEGRAM_BOT_TOKEN is not set in environment variables!")
@@ -44,7 +44,7 @@ TELEGRAM_CHAT_IDS = [cid.strip() for cid in os.getenv("TELEGRAM_CHAT_ID", "48781
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
 COINGECKO_API = "https://api.coingecko.com/api/v3"
 
-================= EXCHANGE INIT =================
+# ================= EXCHANGE INIT =================
 try:
     exchange = getattr(ccxt, EXCHANGE_ID)({
         'enableRateLimit': True,
@@ -55,10 +55,10 @@ except Exception as e:
     print(f"❌ Critical Error initializing exchange: {e}")
     exit(1)
 
-================= CACHE =================
+# ================= CACHE =================
 market_cap_cache = {}
 
-================= TELEGRAM =================
+# ================= TELEGRAM =================
 def send_telegram_message(text, chat_id=None):
     targets = [chat_id] if chat_id else TELEGRAM_CHAT_IDS
     for cid in targets:
@@ -78,7 +78,7 @@ def send_telegram_message(text, chat_id=None):
         except Exception as e:
             print(f"❌ Telegram Error ({cid}): {e}")
 
-================= COINGECKO =================
+# ================= COINGECKO =================
 def load_market_caps():
     if market_cap_cache: return
     print("📥 Loading Market Cap from CoinGecko ...")
@@ -111,7 +111,7 @@ def fmt_mc(value):
     if v >= 1e6: return f"💎 ${v/1e6:.2f}M"
     return f"💎 ${v:,.0f}"
 
-================= DEDUPLICATION =================
+# ================= DEDUPLICATION =================
 def get_filtered_pairs():
     symbol_map = {}
     for symbol, info in exchange_markets.items():
@@ -126,7 +126,7 @@ def get_filtered_pairs():
                 symbol_map[base] = (symbol, info, True)
     return [(sym, inf) for sym, inf, _ in symbol_map.values()]
 
-================= DATA & INDICATORS =================
+# ================= DATA & INDICATORS =================
 def fetch_ohlcv(symbol, timeframe, limit):
     try:
         data = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
@@ -199,7 +199,7 @@ def calc_hourly_indicators(df):
     
     return df
 
-================= MAIN SCAN LOGIC =================
+# ================= MAIN SCAN LOGIC =================
 def run_scan(pairs):
     results = []
     total = len(pairs)
@@ -286,7 +286,7 @@ def run_scan(pairs):
 
     return results, passed_filter1, passed_filter2
 
-================= MESSAGE BUILDERS =================
+# ================= MESSAGE BUILDERS =================
 def build_message(signals, total_pairs, passed_f1, passed_f2):
     now = jdatetime.datetime.now(pytz.timezone('Asia/Tehran')).strftime('%Y/%m/%d %H:%M:%S')
     header = (
@@ -331,7 +331,7 @@ def build_message(signals, total_pairs, passed_f1, passed_f2):
     if not msgs: msgs.append(f"{header}❌ هیچ نمادی هر سه فیلتر را پاس نکرد.{footer}")
     return msgs
 
-================= MAIN =================
+# ================= MAIN =================
 def run():
     print("🚀 شروع اسکن سه مرحله‌ای...")
     load_market_caps()
@@ -347,7 +347,7 @@ def run():
         
     print("✅ پایان کامل اسکن")
 
-================= RUN =================
+# ================= RUN =================
 if __name__ == "__main__":
     send_telegram_message("🤖 <b>اسکن سه مرحله‌ای شروع شد </b>\n1️⃣ روزانه: EMA30 ≥ EMA50\n2️⃣ ساعتی: RSI(30) > EMA(50) ← Pine Script Exact\n3️⃣ ساعتی: RSI_MA 30-70\n📊 سورت بر اساس Risk% ")
     run()
