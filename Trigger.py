@@ -219,15 +219,21 @@ def scan_market(pairs):
             if not (MIN_RISK <= risk_pct <= MAX_RISK):
                 continue
 
-            # ========== محاسبه V_alpha ==========
-            # حجم ۵ ساعت اخیر / حجم ۲۰ ساعت اخیر * 100
-            volume_5h = df_hourly['volume'].iloc[-5:].sum()
-            volume_200h = df_hourly['volume'].iloc[-200:].sum()
-
-            if volume_200h > 0:
-                v_alpha = (volume_5h / volume_200h) * 100
+         
+            # ========== محاسبه Volume Ratio (مقایسه میانگین‌ها) ==========
+            avg_5h = df_hourly['volume'].iloc[-5:].mean()   # میانگین حجم ۵ ساعت اخیر
+            avg_200h = df_hourly['volume'].iloc[-200:].mean() # میانگین حجم ۲۰۰ ساعت اخیر
+            
+            if avg_200h > 0 and not np.isnan(avg_200h):
+                volume_ratio = avg_5h / avg_200h          # نسبت: مثلاً 2.5 یعنی ۲.۵ برابر میانگین
+                volume_change_pct = (volume_ratio - 1) * 100  # درصد تغییر: مثلاً +150%
             else:
-                v_alpha = 0
+                volume_ratio = 0
+                volume_change_pct = 0
+            
+            # ذخیره در دیکشنری (کلید v_alpha را نگه می‌داریم تا کدهای بعدی خراب نشوند)
+            # اما مقدار آن را همان ratio قرار می‌دهیم
+            v_alpha = volume_ratio 
 
             # ========== دریافت مارکت کپ ==========
             symbol_base = symbol.split('/')[0]
@@ -304,14 +310,28 @@ def build_message(signals, total_scanned):
         else:
             mc_str = "N/A"
 
+        
+        # اگر volume_ratio > 1.5 باشد (جهش حجم)، با ایموجی 🔥 نمایش بده
+        if s['v_alpha'] > 1.5:
+            vol_emoji = "🔥"
+            vol_text = f"{s['v_alpha']:.2f}x"  # نمایش به صورت ضریب
+        elif s['v_alpha'] > 1.0:
+            vol_emoji = "📈"
+            vol_text = f"{s['v_alpha']:.2f}x"
+        else:
+            vol_emoji = "📉"
+            vol_text = f"{s['v_alpha']:.2f}x"
+        
         card = (
             f"{r}. <a href='{tv_link}'>{escape(s['symbol'])}</a> [{s['mkt_type']}]\n"
             f"💰 Price: {s['price']:,.6f} USDT\n"
             f"⚠️ Risk: {s['risk_pct']:.2f}%\n"
-            f"📊 V_alpha: {s['v_alpha']:.2f}\n"
+            f"{vol_emoji} Vol Ratio: <b>{vol_text}</b>\n"  # نمایش جدید
             f"🏛️ Market Cap: {mc_str}\n"
             f"─────────────────────\n"
         )
+        
+
 
         if len(header) + len(body) + len(card) + len(footer) > MAX - 100:
             msgs.append(header + body + footer)
