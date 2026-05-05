@@ -36,7 +36,7 @@ MAX_RISK = 7.0
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_IDS = [cid.strip() for cid in os.getenv("TELEGRAM_CHAT_ID", "").split(",") if cid.strip()]
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
-
+CMC_API_KEY = os.getenv("CMC_PRO_API_KEY", "39478549b7c94ee093d0f3cbe43a39e9")
 # اگر توکن تلگرام تنظیم نشده باشد، فقط در کنسول نمایش می‌دهد
 if not TELEGRAM_BOT_TOKEN:
     print("⚠️ TELEGRAM_BOT_TOKEN is not set. Running in console-only mode.")
@@ -106,47 +106,48 @@ def fetch_ohlcv(symbol, timeframe, limit):
             print(f"⚠️ Fetch error {symbol}: {e}")
         return None
 
-# ================= COINGECKO MARKET CAP =================
-def get_market_cap_from_coingecko(symbol_base):
+
+# ================= COINMARKETCAP MARKET CAP =================
+def get_market_cap_from_cmc(symbol_base):
     """
-    دریافت مارکت کپ از CoinGecko
+    دریافت مارکت کپ از CoinMarketCap API
     """
     try:
-        # جستجوی نماد در CoinGecko
-        search_url = f"https://api.coingecko.com/api/v3/search?query={symbol_base.lower()}"
-        resp = requests.get(search_url, timeout=5)
-        if resp.status_code != 200:
+        if not CMC_API_KEY:
             return None
 
-        results = resp.json().get('coins', [])
-        if not results:
-            return None
+        url = "https://pro-api.coinmarketcap.com/v3/cryptocurrency/quotes/latest"
+        params = {
+            'symbol': symbol_base.upper(),
+            'convert': 'USD'
+        }
+        headers = {
+            'X-CMC_PRO_API_KEY': CMC_API_KEY,
+            'Accept': 'application/json'
+        }
 
-        # پیدا کردن بهترین تطابق
-        coin_id = None
-        for coin in results[:5]:  # بررسی ۵ نتیجه اول
-            if coin.get('symbol', '').lower() == symbol_base.lower():
-                coin_id = coin.get('id')
-                break
-
-        if not coin_id:
-            # استفاده از اولین نتیجه
-            coin_id = results[0].get('id')
-
-        # دریافت اطلاعات مارکت کپ
-        market_url = f"https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&ids={coin_id}"
-        resp = requests.get(market_url, timeout=5)
+        resp = requests.get(url, params=params, headers=headers, timeout=5)
         if resp.status_code != 200:
             return None
 
         data = resp.json()
-        if data and len(data) > 0:
-            return data[0].get('market_cap')
+        if data.get('status', {}).get('error_code') != 0:
+            return None
+
+        crypto_data = data.get('data', {})
+        if not crypto_data:
+            return None
+
+        for key, value in crypto_data.items():
+            quote = value.get('quote', {}).get('USD', {})
+            market_cap = quote.get('market_cap')
+            if market_cap is not None and market_cap > 0:
+                return float(market_cap)
 
         return None
     except Exception as e:
         if DEBUG_MODE:
-            print(f"⚠️ CoinGecko error for {symbol_base}: {e}")
+            print(f"⚠️ CMC error for {symbol_base}: {e}")
         return None
 
 # ================= SCAN FUNCTION =================
@@ -237,8 +238,8 @@ def scan_market(pairs):
 
             # ========== دریافت مارکت کپ ==========
             symbol_base = symbol.split('/')[0]
-            market_cap = get_market_cap_from_coingecko(symbol_base)
-
+          
+            market_cap = get_market_cap_from_cmc(symbol_base)
             # اگر مارکت کپ پیدا نشد، محاسبه تقریبی
             if market_cap is None:
                 # برای صرافی XT، اطلاعات circulating supply موجود نیست
