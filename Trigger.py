@@ -278,7 +278,8 @@ def scan_market(pairs):
     return results
 
 # ================= MESSAGE BUILDER =================
-def build_message(signals, total_scanned):
+
+def build_card_messages(signals, total_scanned):  
     """ساخت پیام تلگرام"""
     now = datetime.now().strftime('%Y/%m/%d %H:%M:%S')
 
@@ -353,6 +354,47 @@ def build_message(signals, total_scanned):
 
     return msgs
 
+# ================= TABLE SUMMARY BUILDER =================
+def build_table_summary(signals):
+    """ساخت پیام خلاصه جدولی - بعد از کارت‌ها"""
+    if not signals:
+        return None
+
+    # آماده‌سازی دیتا
+    data = []
+    for s in signals:
+        tv_symbol = s['symbol'].replace('/', '')
+        link = f"https://www.tradingview.com/chart/?symbol=:{tv_symbol}"
+        symbol_link = f"<a href='{link}'>{escape(s['symbol_base'])}</a>"
+        data.append({
+            'symbol': symbol_link,
+            'risk': s['risk_pct'],
+            'vol': s['v_alpha']
+        })
+
+    # جدول ۱: سورت بر اساس ریسک (کم ➡ زیاد)
+    tbl_risk = "<b>📋 خلاصه جدولی | سورت بر اساس ریسک</b>\n"
+    tbl_risk += "<code>🔹 Risk: Low → High\n"
+    tbl_risk += "Rank | Symbol   | Risk% | Vol\n"
+    tbl_risk += "-----+----------+-------+------\n"
+    
+    for i, row in enumerate(sorted(data, key=lambda x: x['risk'])[:12], 1):
+        tbl_risk += f"{i:4} | {row['symbol']:<8} | {row['risk']:5.2f} | {row['vol']:4.2f}x\n"
+    tbl_risk += "</code>"
+
+    # جدول ۲: سورت بر اساس حجم (زیاد ➡ کم)
+    tbl_vol = "\n<b>🔥 سورت بر اساس حجم</b>\n"
+    tbl_vol += "<code>🔹 Volume: High → Low\n"
+    tbl_vol += "Rank | Symbol   | Risk% | Vol\n"
+    tbl_vol += "-----+----------+-------+------\n"
+    
+    for i, row in enumerate(sorted(data, key=lambda x: x['vol'], reverse=True)[:12], 1):
+        mark = "🔥" if row['vol'] > 2.0 else ""
+        tbl_vol += f"{i:4} | {row['symbol']:<8} | {row['risk']:5.2f} | {row['vol']:4.2f}x{mark}\n"
+    tbl_vol += "</code>"
+
+    return tbl_risk + tbl_vol
+
 # ================= TELEGRAM =================
 def send_telegram_message(text, chat_id=None):
     """ارسال پیام به تلگرام"""
@@ -412,17 +454,25 @@ def run():
         print("=" * 60)
 
     # ارسال به تلگرام
+      # ========== ارسال به تلگرام ==========
     if TELEGRAM_CHAT_IDS:
         print("\n📤 ارسال نتایج به تلگرام...")
-        messages = build_message(results, len(pairs))
-        for msg in messages:
+        
+        # ۱️⃣ اول: ارسال کارت‌های کامل (همان کد قبلی)
+        card_msgs = build_card_messages(results, len(pairs))  # ✅ نام جدید تابع
+        for msg in card_msgs:
             send_telegram_message(msg)
             time.sleep(0.3)
-        print("✅ پیام‌ها ارسال شدند")
-    else:
-        print("\n⚠️ TELEGRAM_CHAT_ID تنظیم نشده است")
-
-    return results
+        
+        # ۲️⃣ دوم: ارسال جدول خلاصه شیک (جدید) ✨
+        table_msg = build_table_summary(results)
+        if table_msg:
+            # یک مکث کوتاه بین دو پیام
+            time.sleep(0.5)
+            send_telegram_message(table_msg)
+            print("✅ جدول خلاصه نیز ارسال شد")
+        
+        print("✅ همه پیام‌ها ارسال شدند")
 
 # ================= RUN =================
 if __name__ == "__main__":
