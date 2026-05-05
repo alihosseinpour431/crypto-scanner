@@ -110,7 +110,7 @@ def fetch_ohlcv(symbol, timeframe, limit):
 # ================= COINMARKETCAP MARKET CAP =================
 def get_market_cap_from_cmc(symbol_base):
     """
-    دریافت مارکت کپ از CoinMarketCap API
+    دریافت مارکت کپ از CoinMarketCap API v3
     """
     try:
         if not CMC_API_KEY:
@@ -138,18 +138,23 @@ def get_market_cap_from_cmc(symbol_base):
         if not crypto_data:
             return None
 
-        for key, value in crypto_data.items():
-            quote = value.get('quote', {}).get('USD', {})
-            market_cap = quote.get('market_cap')
-            if market_cap is not None and market_cap > 0:
-                return float(market_cap)
+        # ✅ اصلاح مهم: در API v3، مقدار هر نماد یک لیست است
+        for symbol, crypto_list in crypto_data.items():
+            if isinstance(crypto_list, list) and crypto_list:
+                # گرفتن اولین آیتم لیست (معتبرترین کوین با آن نماد)
+                crypto_info = crypto_list[0]
+                
+                quote = crypto_info.get('quote', {}).get('USD', {})
+                market_cap = quote.get('market_cap')
+                
+                if market_cap is not None and market_cap > 0:
+                    return float(market_cap)
 
         return None
     except Exception as e:
         if DEBUG_MODE:
             print(f"⚠️ CMC error for {symbol_base}: {e}")
         return None
-
 # ================= SCAN FUNCTION =================
 def scan_market(pairs):
     """
