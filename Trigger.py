@@ -1,9 +1,8 @@
 
-# scanner_xt_new.py
 # ✅ اسکنر بازار کریپتو - صرافی XT با فیلترهای جدید
 # فیلتر ۱: روزانه - EMA30 > EMA50
 # فیلتر ۲: ساعتی - EMA30 > EMA50 > EMA200
-# فیلتر ۳: ریسک - (EMA200 - EMA50) / EMA200 * 100 => بین 0 تا 10 درصد
+# فیلتر ۳: ریسک - (EMA50 - EMA200) / EMA200 * 100 => بین 0 تا 10 درصد (مثبت)
 
 import os
 import time
@@ -13,6 +12,7 @@ import numpy as np
 from datetime import datetime
 from html import escape
 from tqdm.auto import tqdm
+import requests
 
 # ================= CONFIG =================
 EXCHANGE_ID = 'xt'
@@ -98,11 +98,55 @@ def fetch_ohlcv(symbol, timeframe, limit):
 
         df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['close'] = df['close'].astype(float)
+        df['volume'] = df['volume'].astype(float)
 
         return df
     except Exception as e:
         if DEBUG_MODE:
             print(f"⚠️ Fetch error {symbol}: {e}")
+        return None
+
+# ================= COINGECKO MARKET CAP =================
+def get_market_cap_from_coingecko(symbol_base):
+    """
+    دریافت مارکت کپ از CoinGecko
+    """
+    try:
+        # جستجوی نماد در CoinGecko
+        search_url = f"https://api.coingecko.com/api/v3/search?query={symbol_base.lower()}"
+        resp = requests.get(search_url, timeout=5)
+        if resp.status_code != 200:
+            return None
+
+        results = resp.json().get('coins', [])
+        if not results:
+            return None
+
+        # پیدا کردن بهترین تطابق
+        coin_id = None
+        for coin in results[:5]:  # بررسی ۵ نتیجه اول
+            if coin.get('symbol', '').lower() == symbol_base.lower():
+                coin_id = coin.get('id')
+                break
+
+        if not coin_id:
+            # استفاده از اولین نتیجه
+            coin_id = results[0].get('id')
+
+        # دریافت اطلاعات مارکت کپ
+        market_url = f"https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&ids={coin_id}"
+        resp = requests.get(market_url, timeout=5)
+        if resp.status_code != 200:
+            return None
+
+        data = resp.json()
+        if data and len(data) > 0:
+            return data[0].get('market_cap')
+
+        return None
+    except Exception as e:
+        if DEBUG_MODE:
+            print(f"⚠️ CoinGecko error for {symbol_base}: {e}")
         return None
 
 # ================= SCAN FUNCTION =================
@@ -111,7 +155,7 @@ def scan_market(pairs):
     اسکن بازار با سه فیلتر:
     ۱. روزانه: EMA30 > EMA50
     ۲. ساعتی: EMA30 > EMA50 > EMA200
-    ۳. ریسک: (EMA200 - EMA50) / EMA200 * 100 => بین 0 تا 10 درصد
+    ۳. ریسک: (EMA50 - EMA200) / EMA200 * 100 => بین 0 تا 10 درصد (مثبت)
     """
     results = []
     total = len(pairs)
@@ -119,7 +163,7 @@ def scan_market(pairs):
     print(f"🔍 شروع اسکن {total} نماد...")
     print(f"   فیلتر ۱: EMA30 > EMA50 (روزانه)")
     print(f"   فیلتر ۲: EMA30 > EMA50 > EMA200 (ساعتی)")
-    print(f"   فیلتر ۳: Risk% = (EMA200 - EMA50) / EMA200 * 100 => بین {MIN_RISK} تا {MAX_RISK} درصد")
+    print(f"   فیلتر ۳: Risk% = (EMA50 - EMA200) / EMA200 * 100 => بین {MIN_RISK} تا {MAX_RISK} درصد (مثبت)")
     print("-" * 50)
 
     for idx, (symbol, info) in enumerate(tqdm(pairs, desc="Scanning", total=total), 1):
@@ -167,39 +211,44 @@ def scan_market(pairs):
                 continue
 
             # ========== فیلتر ۳: محاسبه ریسک ==========
-            # Risk% = (EMA200 - EMA50) / EMA200 * 100
-            # وقتی EMA50 > EMA200 باشد (روند صعودی)، این مقدار منفی می‌شود
-            # پس ما قدر مطلق یا فرمت دیگری نیاز داریم
-            # طبق درخواست شما: (ema 200 - ema 50)/ema 200 *100
-            # اگر EMA50 > EMA200 باشد => ریسک منفی => یعنی قیمت بالای EMA200 است
-            # برای روند صعودی، ما می‌خواهیم ریسک 0 تا 10 درصد باشد
-            # پس باید فرمول را به صورت |(EMA200 - EMA50) / EMA200 * 100| در نظر بگیریم
-            # یا اینکه شرط را تغییر دهیم به: ریسک بین -10 تا 0 (برای روند صعودی)
+            # Risk% = (EMA50 - EMA200) / EMA200 * 100
+            # فقط مقادیر مثبت (یعنی EMA50 > EMA200)
+            risk_pct = ((last_hourly['ema50'] - last_hourly['ema200']) / last_hourly['ema200']) * 100
 
-            risk_pct = ((last_hourly['ema200'] - last_hourly['ema50']) / last_hourly['ema200']) * 100
-
-            # برای روند صعودی که EMA50 > EMA200 است، ریسک منفی خواهد بود
-            # ما می‌خواهیم فاصله EMA50 از EMA200 حداکثر 10٪ باشد
-            # پس قدر مطلق را بررسی می‌کنیم
-            risk_abs = abs(risk_pct)
-
-            # شرط ۳: ریسک بین 0 تا 10 درصد (قدر مطلق)
-            if not (MIN_RISK <= risk_abs <= MAX_RISK):
+            # شرط ۳: ریسک بین 0 تا 10 درصد (مثبت)
+            if not (MIN_RISK <= risk_pct <= MAX_RISK):
                 continue
+
+            # ========== محاسبه V_alpha ==========
+            # حجم ۵ ساعت اخیر / حجم ۲۰ ساعت اخیر * 100
+            volume_5h = df_hourly['volume'].iloc[-5:].sum()
+            volume_200h = df_hourly['volume'].iloc[-200:].sum()
+
+            if volume_200h > 0:
+                v_alpha = (volume_5h / volume_200h) * 100
+            else:
+                v_alpha = 0
+
+            # ========== دریافت مارکت کپ ==========
+            symbol_base = symbol.split('/')[0]
+            market_cap = get_market_cap_from_coingecko(symbol_base)
+
+            # اگر مارکت کپ پیدا نشد، محاسبه تقریبی
+            if market_cap is None:
+                # برای صرافی XT، اطلاعات circulating supply موجود نیست
+                # بنابراین از محاسبه تقریبی استفاده نمی‌کنیم و None می‌گذاریم
+                market_cap = None
 
             # ✅ همه فیلترها پاس شدند
             mkt_type = 'F' if (info.get('future') or info.get('swap')) else 'S'
 
             results.append({
                 'symbol': symbol,
+                'symbol_base': symbol_base,
                 'price': last_hourly['close'],
-                'daily_ema30': last_daily['ema30'],
-                'daily_ema50': last_daily['ema50'],
-                'hourly_ema30': last_hourly['ema30'],
-                'hourly_ema50': last_hourly['ema50'],
-                'hourly_ema200': last_hourly['ema200'],
                 'risk_pct': risk_pct,
-                'risk_abs': risk_abs,
+                'v_alpha': v_alpha,
+                'market_cap': market_cap,
                 'mkt_type': mkt_type,
                 'info': info
             })
@@ -211,8 +260,8 @@ def scan_market(pairs):
         # تأخیر کوتاه برای رعایت rate limit
         time.sleep(0.01)
 
-    # سورت بر اساس ریسک (قدر مطلق - کم به زیاد)
-    results.sort(key=lambda x: x['risk_abs'])
+    # سورت بر اساس ریسک (کم به زیاد)
+    results.sort(key=lambda x: x['risk_pct'])
 
     return results
 
@@ -229,23 +278,38 @@ def build_message(signals, total_scanned):
         f"📋 شرایط:\n"
         f" ├─ ۱) EMA30 > EMA50 (روزانه)\n"
         f" ├─ ۲) EMA30 > EMA50 > EMA200 (ساعتی)\n"
-        f" └─ ۳) Risk% = (EMA200 - EMA50) / EMA200 * 100 => 0-10%\n"
+        f" └─ ۳) Risk% = (EMA50 - EMA200) / EMA200 * 100 => 0-10% (مثبت)\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
     )
 
-    footer = f"\n⏰ {now} 🇮🇷\n🤖 XT Scanner v2.0"
+    footer = f"\n⏰ {now} 🇮🇷\n🤖 XT Scanner v3.0"
 
     msgs = []
     body = ""
     MAX = 4000
 
     for r, s in enumerate(signals, 1):
+        # ساخت لینک TradingView
+        tv_symbol = s['symbol'].replace('/', '')
+        tv_link = f"https://www.tradingview.com/chart/?symbol=XT:{tv_symbol}"
+
+        # فرمت کردن مارکت کپ
+        if s['market_cap'] is not None:
+            if s['market_cap'] >= 1e9:
+                mc_str = f"${s['market_cap']/1e9:.2f}B"
+            elif s['market_cap'] >= 1e6:
+                mc_str = f"${s['market_cap']/1e6:.2f}M"
+            else:
+                mc_str = f"${s['market_cap']:,.0f}"
+        else:
+            mc_str = "N/A"
+
         card = (
-            f"{r}. {escape(s['symbol'])} [{s['mkt_type']}]\n"
+            f"{r}. <a href='{tv_link}'>{escape(s['symbol'])}</a> [{s['mkt_type']}]\n"
             f"💰 Price: {s['price']:,.6f} USDT\n"
-            f"📈 Daily: EMA30={s['daily_ema30']:,.6f} > EMA50={s['daily_ema50']:,.6f}\n"
-            f"📈 Hourly: EMA30={s['hourly_ema30']:,.6f} > EMA50={s['hourly_ema50']:,.6f} > EMA200={s['hourly_ema200']:,.6f}\n"
-            f"⚠️ Risk: {s['risk_abs']:.2f}% (signed: {s['risk_pct']:+.2f}%)\n"
+            f"⚠️ Risk: {s['risk_pct']:.2f}%\n"
+            f"📊 V_alpha: {s['v_alpha']:.2f}\n"
+            f"🏛️ Market Cap: {mc_str}\n"
             f"─────────────────────\n"
         )
 
@@ -282,7 +346,7 @@ def send_telegram_message(text, chat_id=None):
             'chat_id': cid,
             'text': text,
             'parse_mode': 'HTML',
-            'disable_web_page_preview': True
+            'disable_web_page_preview': False  # فعال کردن لینک‌ها
         }
 
         try:
@@ -313,11 +377,12 @@ def run():
         print("🎯 نمادهای پیدا شده (مرتب شده بر اساس ریسک):")
         print("=" * 60)
         for i, r in enumerate(results, 1):
+            mc_str = f"${r['market_cap']:,.0f}" if r['market_cap'] else "N/A"
             print(f"\n{i}. {r['symbol']} [{r['mkt_type']}]")
             print(f"   Price: {r['price']:,.6f}")
-            print(f"   Daily: EMA30={r['daily_ema30']:,.6f} > EMA50={r['daily_ema50']:,.6f}")
-            print(f"   Hourly: EMA30={r['hourly_ema30']:,.6f} > EMA50={r['hourly_ema50']:,.6f} > EMA200={r['hourly_ema200']:,.6f}")
-            print(f"   ⚠️ Risk: {r['risk_abs']:.2f}% (signed: {r['risk_pct']:+.2f}%)")
+            print(f"   ⚠️ Risk: {r['risk_pct']:.2f}%")
+            print(f"   📊 V_alpha: {r['v_alpha']:.2f}")
+            print(f"   🏛️ Market Cap: {mc_str}")
         print("=" * 60)
 
     # ارسال به تلگرام
