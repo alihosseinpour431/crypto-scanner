@@ -30,7 +30,7 @@ MIN_BARS_REQUIRED = 200
 
 # تنظیمات ریسک
 MIN_RISK = 0.0
-MAX_RISK = 10.0
+MAX_RISK = 7.0
 
 # ================= ENV & SECURITY =================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -291,7 +291,7 @@ def build_message(signals, total_scanned):
     for r, s in enumerate(signals, 1):
         # ساخت لینک TradingView
         tv_symbol = s['symbol'].replace('/', '')
-        tv_link = f"https://www.tradingview.com/chart/?symbol=XT:{tv_symbol}"
+        tv_link = f"https://www.tradingview.com/chart/?symbol=:{tv_symbol}"
 
         # فرمت کردن مارکت کپ
         if s['market_cap'] is not None:
