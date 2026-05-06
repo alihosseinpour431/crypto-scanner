@@ -462,9 +462,9 @@ def run():
 
     # نمایش نتایج در کنسول
     if results:
-        print("\n" + "=" * 60)
+        print("\n" + "=" * 5)
         print("🎯 نمادهای پیدا شده (مرتب شده بر اساس ریسک):")
-        print("=" * 60)
+        print("=" * 5)
         for i, r in enumerate(results, 1):
             mc_str = f"${r['market_cap']:,.0f}" if r['market_cap'] else "N/A"
             print(f"\n{i}. {r['symbol']} [{r['mkt_type']}]")
@@ -472,7 +472,7 @@ def run():
             print(f"   ⚠️ Risk: {r['risk_pct']:.2f}%")
             print(f"   📊 V_alpha: {r['v_alpha']:.2f}")
             print(f"   🏛️ Market Cap: {mc_str}")
-        print("=" * 60)
+        print("=" * 5)
 
     # ارسال به تلگرام
     # ========== ارسال به تلگرام ==========
