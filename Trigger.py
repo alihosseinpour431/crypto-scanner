@@ -30,7 +30,7 @@ MIN_BARS_REQUIRED = 200
 
 # تنظیمات ریسک
 MIN_RISK = 0.0
-MAX_RISK = 2.0
+MAX_RISK = 1.0
 
 # ================= ENV & SECURITY =================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
