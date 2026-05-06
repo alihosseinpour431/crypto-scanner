@@ -4,7 +4,7 @@
 # فیلتر ۲: ساعتی - EMA30 > EMA50 > EMA200
 # فیلتر ۳: ریسک - (EMA50 - EMA200) / EMA200 * 100 => بین 0 تا 10 درصد (مثبت)
 
-import os
+import os 
 import time
 import ccxt
 import pandas as pd
@@ -30,7 +30,7 @@ MIN_BARS_REQUIRED = 200
 
 # تنظیمات ریسک
 MIN_RISK = 0.0
-MAX_RISK = 1.0
+MAX_RISK = 2.0
 
 # ================= ENV & SECURITY =================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -120,7 +120,7 @@ def get_market_cap_from_cmc(symbol_base):
             'symbol': symbol_base.upper(),
             'convert': 'USD'
         }
-
+      
         headers = {
             'X-CMC_PRO_API_KEY': CMC_API_KEY,
             'Accepts': 'application/json'  # با s
@@ -128,21 +128,21 @@ def get_market_cap_from_cmc(symbol_base):
 
         resp = requests.get(url, params=params, headers=headers, timeout=5)
         resp.raise_for_status()  # ✅ بررسی خطاهای HTTP
-
+        
         data = resp.json()
-
+        
         # ✅ اصلاح ۳: بررسی ساختار پاسخ مثل کد کارآمد
         if "data" in data and symbol_base.upper() in data["data"]:
             coin_data = data["data"][symbol_base.upper()]
-
+            
             # استخراج مارکت‌کپ از ساختار quote -> USD
             market_cap = coin_data.get("quote", {}).get("USD", {}).get("market_cap")
-
+            
             if market_cap is not None and market_cap > 0:
                 return float(market_cap)
-
+        
         return None
-
+        
     except requests.exceptions.HTTPError as e:
         if DEBUG_MODE:
             print(f"⚠️ CMC HTTP Error for {symbol_base}: {e}")
@@ -228,25 +228,25 @@ def scan_market(pairs):
             if not (MIN_RISK <= risk_pct <= MAX_RISK):
                 continue
 
-
+         
             # ========== محاسبه Volume Ratio (مقایسه میانگین‌ها) ==========
             avg_5h = df_hourly['volume'].iloc[-5:].mean()   # میانگین حجم ۵ ساعت اخیر
             avg_200h = df_hourly['volume'].iloc[-200:].mean() # میانگین حجم ۲۰۰ ساعت اخیر
-
+            
             if avg_200h > 0 and not np.isnan(avg_200h):
                 volume_ratio = avg_5h / avg_200h          # نسبت: مثلاً 2.5 یعنی ۲.۵ برابر میانگین
                 volume_change_pct = (volume_ratio - 1) * 100  # درصد تغییر: مثلاً +150%
             else:
                 volume_ratio = 0
                 volume_change_pct = 0
-
+            
             # ذخیره در دیکشنری (کلید v_alpha را نگه می‌داریم تا کدهای بعدی خراب نشوند)
             # اما مقدار آن را همان ratio قرار می‌دهیم
-            v_alpha = volume_ratio
+            v_alpha = volume_ratio 
 
             # ========== دریافت مارکت کپ ==========
             symbol_base = symbol.split('/')[0]
-
+          
             market_cap = get_market_cap_from_cmc(symbol_base)
             # اگر مارکت کپ پیدا نشد، محاسبه تقریبی
             if market_cap is None:
@@ -282,7 +282,7 @@ def scan_market(pairs):
 
 # ================= MESSAGE BUILDER =================
 
-def build_card_messages(signals, total_scanned):
+def build_card_messages(signals, total_scanned):  
     """ساخت پیام تلگرام"""
     now = datetime.now().strftime('%Y/%m/%d %H:%M:%S')
 
@@ -320,7 +320,7 @@ def build_card_messages(signals, total_scanned):
         else:
             mc_str = "N/A"
 
-
+        
         # اگر volume_ratio > 1.5 باشد (جهش حجم)، با ایموجی 🔥 نمایش بده
         if s['v_alpha'] > 1.5:
             vol_emoji = "🔥"
@@ -331,7 +331,7 @@ def build_card_messages(signals, total_scanned):
         else:
             vol_emoji = "📉"
             vol_text = f"{s['v_alpha']:.2f}x"
-
+        
         card = (
             f"{r}. <a href='{tv_link}'>{escape(s['symbol'])}</a> [{s['mkt_type']}]\n"
             f"💰 Price: {s['price']:,.6f} USDT\n"
@@ -340,7 +340,7 @@ def build_card_messages(signals, total_scanned):
             f"🏛️ Market Cap: {mc_str}\n"
             f"─────────────────────\n"
         )
-
+        
 
 
         if len(header) + len(body) + len(card) + len(footer) > MAX - 100:
@@ -380,7 +380,7 @@ def build_table_summary(signals):
     tbl_risk += "<code>🔹 Risk: Low → High\n"
     tbl_risk += "Rank | Symbol   | Risk% | Vol\n"
     tbl_risk += "-----+----------+-------+------\n"
-
+    
     for i, row in enumerate(sorted(data, key=lambda x: x['risk'])[:12], 1):
         tbl_risk += f"{i:4} | {row['symbol']:<8} | {row['risk']:5.2f} | {row['vol']:4.2f}x\n"
     tbl_risk += "</code>"
@@ -390,7 +390,7 @@ def build_table_summary(signals):
     tbl_vol += "<code>🔹 Volume: High → Low\n"
     tbl_vol += "Rank | Symbol   | Risk% | Vol\n"
     tbl_vol += "-----+----------+-------+------\n"
-
+    
     for i, row in enumerate(sorted(data, key=lambda x: x['vol'], reverse=True)[:12], 1):
         mark = "🔥" if row['vol'] > 2.0 else ""
         tbl_vol += f"{i:4} | {row['symbol']:<8} | {row['risk']:5.2f} | {row['vol']:4.2f}x{mark}\n"
@@ -399,7 +399,7 @@ def build_table_summary(signals):
     return tbl_risk + tbl_vol
 
 # ================= TELEGRAM =================
-def send_telegram_message(text, chat_id=None, reply_markup=None):
+def send_telegram_message(text, chat_id=None):
     """ارسال پیام به تلگرام"""
     if not TELEGRAM_BOT_TOKEN:
         print("⚠️ Telegram token not set, skipping message")
@@ -420,10 +420,6 @@ def send_telegram_message(text, chat_id=None, reply_markup=None):
             'disable_web_page_preview': False  # فعال کردن لینک‌ها
         }
 
-        # اضافه کردن دکمه‌های Inline اگر وجود داشته باشد
-        if reply_markup:
-            payload['reply_markup'] = reply_markup
-
         try:
             import requests
             r = requests.post(url, json=payload, timeout=30)
@@ -431,20 +427,6 @@ def send_telegram_message(text, chat_id=None, reply_markup=None):
                 print(f"⚠️ Telegram ({cid}): {r.status_code} | {r.text[:100]}")
         except Exception as e:
             print(f"❌ Telegram Error ({cid}): {e}")
-
-
-def build_sort_keyboard(scan_id: str) -> dict:
-    """ساخت کیبورد Inline برای سورت کردن"""
-    keyboard = {
-        'inline_keyboard': [
-            [
-                {'text': '📊 Sort by Volume', 'callback_data': f'sort_volume_{scan_id}'},
-                {'text': '⚠️ Sort by Risk', 'callback_data': f'sort_risk_{scan_id}'},
-                {'text': '🏛️ Sort by Market Cap', 'callback_data': f'sort_mcap_{scan_id}'}
-            ]
-        ]
-    }
-    return keyboard
 
 # ================= MAIN =================
 def run():
@@ -462,9 +444,9 @@ def run():
 
     # نمایش نتایج در کنسول
     if results:
-        print("\n" + "=" * 5)
+        print("\n" + "=" * 60)
         print("🎯 نمادهای پیدا شده (مرتب شده بر اساس ریسک):")
-        print("=" * 5)
+        print("=" * 60)
         for i, r in enumerate(results, 1):
             mc_str = f"${r['market_cap']:,.0f}" if r['market_cap'] else "N/A"
             print(f"\n{i}. {r['symbol']} [{r['mkt_type']}]")
@@ -472,30 +454,19 @@ def run():
             print(f"   ⚠️ Risk: {r['risk_pct']:.2f}%")
             print(f"   📊 V_alpha: {r['v_alpha']:.2f}")
             print(f"   🏛️ Market Cap: {mc_str}")
-        print("=" * 5)
+        print("=" * 60)
 
     # ارسال به تلگرام
-    # ========== ارسال به تلگرام ==========
+      # ========== ارسال به تلگرام ==========
     if TELEGRAM_CHAT_IDS:
         print("\n📤 ارسال نتایج به تلگرام...")
-
-        # تولید شناسه یکتا برای این اسکن (برای دکمه‌ها)
-        import uuid
-        scan_id = str(uuid.uuid4())[:8]
-
-        # ساخت کیبورد سورت
-        sort_keyboard = build_sort_keyboard(scan_id)
-
+        
         # ۱️⃣ اول: ارسال کارت‌های کامل (همان کد قبلی)
         card_msgs = build_card_messages(results, len(pairs))  # ✅ نام جدید تابع
-        for i, msg in enumerate(card_msgs):
-            # فقط به آخرین پیام، کیبورد سورت را اضافه کن
-            if i == len(card_msgs) - 1:
-                send_telegram_message(msg, reply_markup=sort_keyboard)
-            else:
-                send_telegram_message(msg)
+        for msg in card_msgs:
+            send_telegram_message(msg)
             time.sleep(0.3)
-
+        
         # ۲️⃣ دوم: ارسال جدول خلاصه شیک (جدید) ✨
         table_msg = build_table_summary(results)
         if table_msg:
@@ -503,7 +474,7 @@ def run():
             time.sleep(0.5)
             send_telegram_message(table_msg)
             print("✅ جدول خلاصه نیز ارسال شد")
-
+        
         print("✅ همه پیام‌ها ارسال شدند")
 
 # ================= RUN =================
