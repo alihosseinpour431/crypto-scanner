@@ -30,7 +30,7 @@ MIN_BARS_REQUIRED = 200
 
 # تنظیمات ریسک
 MIN_RISK = 0.0
-MAX_RISK = 1.0
+MAX_RISK = 8.0
 
 # ================= ENV & SECURITY =================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -357,6 +357,82 @@ def build_card_messages(signals, total_scanned):
 
     return msgs
 
+# ================= NEW: 3 SORTED MESSAGES BUILDER =================
+def build_sorted_summary_messages(signals, total_scanned):
+    """
+    ساخت ۳ پیام جداگانه برای نمایش ۴۰ مورد اول بر اساس:
+    ۱. ریسک (کم به زیاد)
+    ۲. حجم/آلفا (کم به زیاد)
+    ۳. مارکت‌کپ (زیاد به کم)
+    """
+    from html import escape
+    
+    if not signals:
+        return []
+    
+    messages = []
+    now = datetime.now().strftime('%Y/%m/%d %H:%M:%S')
+    LIMIT = 40  # ✅ نمایش حداقل ۴۰ مورد
+    
+    # --- پیام ۱: سورت بر اساس ریسک (کم ➡ زیاد) ---
+    sorted_risk = sorted(signals, key=lambda x: x['risk_pct'])[:LIMIT]
+    msg1 = f"📊 <b>۴۰ نماد برتر | سورت بر اساس ریسک (کم ➡ زیاد)</b>\n"
+    msg1 += f"<code>🔹 Total Scanned: {total_scanned} | Showing: {len(sorted_risk)}\n"
+    msg1 += "Rank | Symbol   | Risk%  | Price\n"
+    msg1 += "-----+----------+--------+----------\n"
+    
+    for i, s in enumerate(sorted_risk, 1):
+        tv_link = f"https://www.tradingview.com/chart/?symbol=:{s['symbol'].replace('/', '')}"
+        symbol_link = f"<a href='{tv_link}'>{escape(s['symbol_base'])}</a>"
+        msg1 += f"{i:4} | {symbol_link:<8} | {s['risk_pct']:6.2f}% | {s['price']:,.6f}\n"
+    msg1 += f"</code>\n⏰ {now} 🇮🇷"
+    messages.append(msg1)
+    
+    # --- پیام ۲: سورت بر اساس Volume Ratio (کم ➡ زیاد) ---
+    sorted_vol = sorted(signals, key=lambda x: x['v_alpha'])[:LIMIT]
+    msg2 = f"📈 <b>۴۰ نماد برتر | سورت بر اساس حجم (کم ➡ زیاد)</b>\n"
+    msg2 += f"<code>🔹 Total Scanned: {total_scanned} | Showing: {len(sorted_vol)}\n"
+    msg2 += "Rank | Symbol   | V_Alpha | Price\n"
+    msg2 += "-----+----------+---------+----------\n"
+    
+    for i, s in enumerate(sorted_vol, 1):
+        tv_link = f"https://www.tradingview.com/chart/?symbol=:{s['symbol'].replace('/', '')}"
+        symbol_link = f"<a href='{tv_link}'>{escape(s['symbol_base'])}</a>"
+        # ایموجی برای حجم‌های بالا
+        vol_mark = " 🔥" if s['v_alpha'] > 2.0 else ""
+        msg2 += f"{i:4} | {symbol_link:<8} | {s['v_alpha']:7.2f}x{vol_mark} | {s['price']:,.6f}\n"
+    msg2 += f"</code>\n⏰ {now} 🇮🇷"
+    messages.append(msg2)
+    
+    # --- پیام ۳: سورت بر اساس مارکت‌کپ (زیاد ➡ کم) ---
+    # فیلتر کردن نمادهایی که مارکت‌کپ معتبر دارند
+    valid_mc = [s for s in signals if s.get('market_cap') and s['market_cap'] > 0]
+    sorted_mc = sorted(valid_mc, key=lambda x: x['market_cap'], reverse=True)[:LIMIT]
+    
+    msg3 = f"🏛️ <b>۴۰ نماد برتر | سورت بر اساس مارکت‌کپ (زیاد ➡ کم)</b>\n"
+    msg3 += f"<code>🔹 Valid MC: {len(valid_mc)} | Showing: {len(sorted_mc)}\n"
+    msg3 += "Rank | Symbol   | MarketCap | Price\n"
+    msg3 += "-----+----------+-----------+----------\n"
+    
+    for i, s in enumerate(sorted_mc, 1):
+        tv_link = f"https://www.tradingview.com/chart/?symbol=:{s['symbol'].replace('/', '')}"
+        symbol_link = f"<a href='{tv_link}'>{escape(s['symbol_base'])}</a>"
+        # فرمت‌بندی مارکت‌کپ
+        mc = s['market_cap']
+        if mc >= 1e9: mc_str = f"${mc/1e9:.2f}B"
+        elif mc >= 1e6: mc_str = f"${mc/1e6:.2f}M"
+        else: mc_str = f"${mc:,.0f}"
+        
+        msg3 += f"{i:4} | {symbol_link:<8} | {mc_str:>9} | {s['price']:,.6f}\n"
+    
+    if not sorted_mc:
+        msg3 += "\n⚠️ هیچ داده‌ی مارکت‌کپی یافت نشد."
+        
+    msg3 += f"</code>\n⏰ {now} 🇮🇷"
+    messages.append(msg3)
+    
+    return messages
+
 # ================= TABLE SUMMARY BUILDER =================
 def build_table_summary(signals):
     """ساخت پیام خلاصه جدولی - بعد از کارت‌ها"""
@@ -467,15 +543,27 @@ def run():
             send_telegram_message(msg)
             time.sleep(0.3)
         
-        # ۲️⃣ دوم: ارسال جدول خلاصه شیک (جدید) ✨
-        table_msg = build_table_summary(results)
-        if table_msg:
-            # یک مکث کوتاه بین دو پیام
-            time.sleep(0.5)
-            send_telegram_message(table_msg)
-            print("✅ جدول خلاصه نیز ارسال شد")
+
+    # ========== ارسال به تلگرام ==========
+    if TELEGRAM_CHAT_IDS:
+        print("\n📤 ارسال نتایج به تلگرام...")
         
-        print("✅ همه پیام‌ها ارسال شدند")
+        # ۱️⃣ ارسال کارت‌های کامل اصلی (کد قبلی)
+        card_msgs = build_card_messages(results, len(pairs))
+        for msg in card_msgs:
+            send_telegram_message(msg)
+            time.sleep(0.3)
+        
+        # ✅ ۲️⃣ ارسال ۳ پیام جدیدِ تفکیک‌شده (جدید)
+        print("🔄 در حال ساخت پیام‌های تفکیک‌شده...")
+        sorted_msgs = build_sorted_summary_messages(results, len(pairs))
+        
+        for i, msg in enumerate(sorted_msgs, 1):
+            print(f"   📤 ارسال پیام شماره {i}...")
+            send_telegram_message(msg)
+            time.sleep(0.5)  # مکث برای جلوگیری از ریت‌لیمیت تلگرام
+            
+        print("✅ همه پیام‌ها (اصلی + ۳ پیام جدید) ارسال شدند")
 
 # ================= RUN =================
 if __name__ == "__main__":
