@@ -30,7 +30,7 @@ MIN_BARS_REQUIRED = 200
 
 # تنظیمات ریسک
 MIN_RISK = 0.0
-MAX_RISK = 7.0
+MAX_RISK = 2.0
 
 # ================= ENV & SECURITY =================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -108,53 +108,56 @@ def fetch_ohlcv(symbol, timeframe, limit):
 
 
 # ================= COINMARKETCAP MARKET CAP =================
+
 def get_market_cap_from_cmc(symbol_base):
-    """
-    دریافت مارکت کپ از CoinMarketCap API v3
-    """
+
     try:
         if not CMC_API_KEY:
             return None
 
-        url = "https://pro-api.coinmarketcap.com/v3/cryptocurrency/quotes/latest"
+        url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest"
         params = {
             'symbol': symbol_base.upper(),
             'convert': 'USD'
         }
+      
         headers = {
             'X-CMC_PRO_API_KEY': CMC_API_KEY,
-            'Accept': 'application/json'
+            'Accepts': 'application/json'  # با s
         }
 
         resp = requests.get(url, params=params, headers=headers, timeout=5)
-        if resp.status_code != 200:
-            return None
-
+        resp.raise_for_status()  # ✅ بررسی خطاهای HTTP
+        
         data = resp.json()
-        if data.get('status', {}).get('error_code') != 0:
-            return None
-
-        crypto_data = data.get('data', {})
-        if not crypto_data:
-            return None
-
-        # ✅ اصلاح مهم: در API v3، مقدار هر نماد یک لیست است
-        for symbol, crypto_list in crypto_data.items():
-            if isinstance(crypto_list, list) and crypto_list:
-                # گرفتن اولین آیتم لیست (معتبرترین کوین با آن نماد)
-                crypto_info = crypto_list[0]
-                
-                quote = crypto_info.get('quote', {}).get('USD', {})
-                market_cap = quote.get('market_cap')
-                
-                if market_cap is not None and market_cap > 0:
-                    return float(market_cap)
-
+        
+        # ✅ اصلاح ۳: بررسی ساختار پاسخ مثل کد کارآمد
+        if "data" in data and symbol_base.upper() in data["data"]:
+            coin_data = data["data"][symbol_base.upper()]
+            
+            # استخراج مارکت‌کپ از ساختار quote -> USD
+            market_cap = coin_data.get("quote", {}).get("USD", {}).get("market_cap")
+            
+            if market_cap is not None and market_cap > 0:
+                return float(market_cap)
+        
+        return None
+        
+    except requests.exceptions.HTTPError as e:
+        if DEBUG_MODE:
+            print(f"⚠️ CMC HTTP Error for {symbol_base}: {e}")
+            if e.response is not None:
+                print(f"   Status: {e.response.status_code} | Body: {e.response.text[:200]}")
+        return None
+    except KeyError as e:
+        if DEBUG_MODE:
+            print(f"⚠️ CMC KeyError for {symbol_base}: {e}")
         return None
     except Exception as e:
         if DEBUG_MODE:
-            print(f"⚠️ CMC error for {symbol_base}: {e}")
+            print(f"⚠️ CMC unexpected error for {symbol_base}: {e}")
         return None
+
 # ================= SCAN FUNCTION =================
 def scan_market(pairs):
     """
