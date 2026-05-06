@@ -4,7 +4,7 @@
 # فیلتر ۲: ساعتی - EMA30 > EMA50 > EMA200
 # فیلتر ۳: ریسک - (EMA50 - EMA200) / EMA200 * 100 => بین 0 تا 10 درصد (مثبت)
 
-import os
+import os 
 import time
 import ccxt
 import pandas as pd
