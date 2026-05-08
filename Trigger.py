@@ -107,6 +107,21 @@ def fetch_ohlcv(symbol, timeframe, limit):
         return None
 
 
+# ================= RSI CALCULATOR =================
+def calculate_rsi(series, period=50):
+    """
+    محاسبه RSI با دوره دلخواه (پیش‌فرض: ۵۰)
+    فرمول استاندارد: RSI = 100 - (100 / (1 + RS))
+    """
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).ewm(alpha=1/period, adjust=False).mean()
+    loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/period, adjust=False).mean()
+    
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    
+    return rsi
+
 # ================= COINMARKETCAP MARKET CAP =================
 
 def get_market_cap_from_cmc(symbol_base):
@@ -227,7 +242,17 @@ def scan_market(pairs):
             # شرط ۳: ریسک بین 0 تا 10 درصد (مثبت)
             if not (MIN_RISK <= risk_pct <= MAX_RISK):
                 continue
-
+            # ========== محاسبه RSI(50) برای روزانه ==========
+            df_daily['rsi_50'] = calculate_rsi(df_daily['close'], period=50)
+            rsi_daily = df_daily.iloc[-1]['rsi_50']
+            
+            # ========== محاسبه RSI(50) برای ساعتی ==========
+            df_hourly['rsi_50'] = calculate_rsi(df_hourly['close'], period=50)
+            rsi_hourly = df_hourly.iloc[-1]['rsi_50']
+            
+            # بررسی NaN بودن RSIها
+            if pd.isna(rsi_daily) or pd.isna(rsi_hourly):
+                continue
          
             # ========== محاسبه Volume Ratio (مقایسه میانگین‌ها) ==========
             avg_5h = df_hourly['volume'].iloc[-5:].mean()   # میانگین حجم ۵ ساعت اخیر
@@ -266,6 +291,8 @@ def scan_market(pairs):
                 'market_cap': market_cap,
                 'mkt_type': mkt_type,
                 'info': info
+                'rsi_daily': rsi_daily,      # RSI(50) روزانه
+                'rsi_hourly': rsi_hourly     # RSI(50) ساعتی
             })
 
         except Exception as e:
@@ -336,7 +363,9 @@ def build_card_messages(signals, total_scanned):
             f"{r}. <a href='{tv_link}'>{escape(s['symbol'])}</a> [{s['mkt_type']}]\n"
             f"💰 Price: {s['price']:,.6f} USDT\n"
             f"⚠️ Risk: {s['risk_pct']:.2f}%\n"
-            f"{vol_emoji} Vol Ratio: <b>{vol_text}</b>\n"  # نمایش جدید
+            f"📊 RSI(50)_d: {s['rsi_daily']:5.2f}\n"
+            f"📊 RSI(50)_h: {s['rsi_hourly']:5.2f}\n"  
+            f"{vol_emoji} Vol Ratio: <b>{vol_text}</b>\n"  
             f"🏛️ Market Cap: {mc_str}\n"
             f"─────────────────────\n"
         )
