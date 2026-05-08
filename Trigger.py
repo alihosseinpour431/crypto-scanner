@@ -441,11 +441,13 @@ def run():
             print(f"\n{i}. {r['symbol']} [{r['mkt_type']}]")
             print(f"   Price: {r['price']:,.6f}")
             print(f"   ⚠️ Risk: {r['risk_pct']:.2f}%")
+            print(f"   📊 RSI_D[{r['rsi_daily']:.2f}]")
+            print(f"   📊 RSI_H[{r['rsi_hourly']:.2f}]")  
             print(f"   📊 V_alpha: {r['v_alpha']:.2f}")
             print(f"   🏛️ Market Cap: {mc_str}")
         print("=" * 60)
 
-    # ارسال به تلگرام
+    
       # ========== ارسال به تلگرام ==========
     if TELEGRAM_CHAT_IDS:
         print("\n📤 ارسال نتایج به تلگرام...")
@@ -457,16 +459,6 @@ def run():
             time.sleep(0.3)
         
 
-    # ========== ارسال به تلگرام ==========
-    if TELEGRAM_CHAT_IDS:
-        print("\n📤 ارسال نتایج به تلگرام...")
-        
-        # ۱️⃣ ارسال کارت‌های کامل اصلی (کد قبلی)
-        card_msgs = build_card_messages(results, len(pairs))
-        for msg in card_msgs:
-            send_telegram_message(msg)
-            time.sleep(0.3)
-        
        
 
 # ================= RUN =================
