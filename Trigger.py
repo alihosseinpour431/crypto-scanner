@@ -290,7 +290,7 @@ def scan_market(pairs):
                 'v_alpha': v_alpha,
                 'market_cap': market_cap,
                 'mkt_type': mkt_type,
-                'info': info
+                'info': info,
                 'rsi_daily': rsi_daily,      # RSI(50) روزانه
                 'rsi_hourly': rsi_hourly     # RSI(50) ساعتی
             })
