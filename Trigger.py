@@ -434,7 +434,7 @@ def run():
     # نمایش نتایج در کنسول
     if results:
         print("\n" + "=" * 60)
-        print("🎯 نمادهای پیدا شده (مرتب شده بر اساس ریسک):")
+        print("🎯 نمادهای پیدا شده (مرتب شده بر اساس RSI ساعتی از بالا به پائین):")
         print("=" * 60)
         for i, r in enumerate(results, 1):
             mc_str = f"${r['market_cap']:,.0f}" if r['market_cap'] else "N/A"
