@@ -302,8 +302,8 @@ def scan_market(pairs):
         # تأخیر کوتاه برای رعایت rate limit
         time.sleep(0.01)
 
-    # سورت بر اساس ریسک (کم به زیاد)
-    results.sort(key=lambda x: x['risk_pct'])
+       # سورت بر اساس RSI ساعتی (بیشترین به کمترین)
+    results.sort(key=lambda x: x['rsi_hourly'], reverse=True)
 
     return results
 
