@@ -208,7 +208,7 @@ def build_card_messages(signals, total_scanned):
     for r, s in enumerate(signals, 1):
         # لینک صحیح تریدینگ ویو با پیشوند XT
         tv_symbol = s['symbol'].replace('/', '')  # مثلاً BTCUSDT
-        tv_link = f"https://www.tradingview.com/chart/?symbol=XT:{tv_symbol}"
+        tv_link = f"https://www.tradingview.com/chart/?symbol=:{tv_symbol}"
 
         # فرمت مارکت کپ (فقط نمایش)
         mc = s['market_cap']
