@@ -1,6 +1,6 @@
-# ✅ اسکنر بازار کریپتو - صرافی XT با فیلتر جدید
-# فیلتر ۱: روزانه - قیمت > EMA50
-# فیلتر ۲: روزانه - RSI(50) > 50
+# ✅ اسکنر بازار کریپتو - صرافی XT با فیلترهای ترکیبی روزانه + ساعتی
+# فیلتر روزانه: Close > EMA50 و RSI(50) > 50
+# فیلتر ساعتی: Close > EMA50 و RSI(50) > 50 (پس از قبولی روزانه)
 
 import os 
 import time
@@ -20,6 +20,8 @@ SCAN_FUTURES = True
 # تایم‌فریم‌ها
 DAILY_TF = '1d'
 DAILY_LIMIT = 300
+HOURLY_TF = '1h'
+HOURLY_LIMIT = 300
 
 # حداقل کندل مورد نیاز
 MIN_BARS_REQUIRED = 200
@@ -28,7 +30,7 @@ MIN_BARS_REQUIRED = 200
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_IDS = [cid.strip() for cid in os.getenv("TELEGRAM_CHAT_ID", "").split(",") if cid.strip()]
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
-CMC_API_KEY = os.getenv("CMC_PRO_API_KEY", "39478549b7c94ee093d0f3cbe439e9")
+CMC_API_KEY = os.getenv("CMC_PRO_API_KEY", "39478549b7c94ee093d0f3cbe43a39e9")
 
 if not TELEGRAM_BOT_TOKEN:
     print("⚠️ TELEGRAM_BOT_TOKEN is not set. Running in console-only mode.")
@@ -148,71 +150,85 @@ def get_market_cap_from_cmc(symbol_base):
 # ================= SCAN FUNCTION =================
 def scan_market(pairs):
     """
-    اسکن بازار با فیلترهای جدید:
-    ۱. روزانه: قیمت > EMA50
-    ۲. روزانه: RSI(50) > 50
+    اسکن بازار با دو سطح فیلتر:
+    ۱. روزانه: Close > EMA50 و RSI(50) > 50
+    ۲. ساعتی: Close > EMA50 و RSI(50) > 50 (در صورت قبولی روزانه)
     """
     results = []
     total = len(pairs)
 
     print(f"🔍 شروع اسکن {total} نماد...")
-    print(f"   فیلتر ۱: قیمت > EMA50 (روزانه)")
-    print(f"   فیلتر ۲: RSI(50) > 50 (روزانه)")
+    print(f"   📅 فیلتر روزانه: Close > EMA50  و  RSI(50) > 50")
+    print(f"   🕐 فیلتر ساعتی: Close > EMA50  و  RSI(50) > 50 (پس از قبولی روزانه)")
     print("-" * 50)
 
     for idx, (symbol, info) in enumerate(tqdm(pairs, desc="Scanning", total=total), 1):
         try:
-            # دریافت داده‌های روزانه
+            # ========== مرحله ۱: فیلتر روزانه ==========
             df_daily = fetch_ohlcv(symbol, DAILY_TF, DAILY_LIMIT)
-
             if df_daily is None:
                 continue
 
-            # محاسبه EMA50 برای روزانه
+            # محاسبه EMA50 و RSI50 برای روزانه
             df_daily['ema50'] = df_daily['close'].ewm(span=50, adjust=False).mean()
-            
-            # محاسبه RSI(50) برای روزانه
             df_daily['rsi_50'] = calculate_rsi(df_daily['close'], period=50)
 
             last_daily = df_daily.iloc[-1]
-
-            # بررسی مقادیر NaN
             if pd.isna(last_daily['close']) or pd.isna(last_daily['ema50']) or pd.isna(last_daily['rsi_50']):
                 continue
 
-            # فیلتر ۱: قیمت > EMA50
-            if not (last_daily['close'] > last_daily['ema50']):
+            # شرط روزانه: Close > EMA50  و  RSI > 50
+            if not (last_daily['close'] > last_daily['ema50'] and last_daily['rsi_50'] > 50):
                 continue
 
-            # فیلتر ۲: RSI(50) > 50
-            if not (last_daily['rsi_50'] > 50):
+            # ========== مرحله ۲: فیلتر ساعتی ==========
+            df_hourly = fetch_ohlcv(symbol, HOURLY_TF, HOURLY_LIMIT)
+            if df_hourly is None:
                 continue
 
-            # محاسبه Volume Ratio (مقایسه میانگین‌ها)
-            avg_5d = df_daily['volume'].iloc[-5:].mean()
-            avg_50d = df_daily['volume'].iloc[-50:].mean()
+            # محاسبه EMA50 و RSI50 برای ساعتی
+            df_hourly['ema50'] = df_hourly['close'].ewm(span=50, adjust=False).mean()
+            df_hourly['rsi_50'] = calculate_rsi(df_hourly['close'], period=50)
+
+            last_hourly = df_hourly.iloc[-1]
+            if pd.isna(last_hourly['close']) or pd.isna(last_hourly['ema50']) or pd.isna(last_hourly['rsi_50']):
+                continue
+
+            # شرط ساعتی: Close > EMA50  و  RSI > 50
+            if not (last_hourly['close'] > last_hourly['ema50'] and last_hourly['rsi_50'] > 50):
+                continue
+
+            # ========== محاسبه نسبت حجم (ساعتی) ==========
+            avg_5h = df_hourly['volume'].iloc[-5:].mean()
+            avg_50h = df_hourly['volume'].iloc[-50:].mean()
             
-            if avg_50d > 0 and not np.isnan(avg_50d):
-                volume_ratio = avg_5d / avg_50d
-                volume_change_pct = (volume_ratio - 1) * 100
+            if avg_50h > 0 and not np.isnan(avg_50h):
+                volume_ratio = avg_5h / avg_50h
             else:
                 volume_ratio = 0
-                volume_change_pct = 0
             
             v_alpha = volume_ratio
 
-            # دریافت مارکت کپ
+            # ========== دریافت مارکت کپ ==========
             symbol_base = symbol.split('/')[0]
             market_cap = get_market_cap_from_cmc(symbol_base)
 
             mkt_type = 'F' if (info.get('future') or info.get('swap')) else 'S'
 
+            # محاسبه درصد فاصله قیمت از EMA50 در هر دو تایم‌فریم
+            daily_dist_pct = ((last_daily['close'] - last_daily['ema50']) / last_daily['ema50']) * 100
+            hourly_dist_pct = ((last_hourly['close'] - last_hourly['ema50']) / last_hourly['ema50']) * 100
+
             results.append({
                 'symbol': symbol,
                 'symbol_base': symbol_base,
-                'price': last_daily['close'],
-                'ema50': last_daily['ema50'],
-                'rsi_daily': last_daily['rsi_50'],
+                'price': last_hourly['close'],
+                'daily_ema50': last_daily['ema50'],
+                'daily_rsi': last_daily['rsi_50'],
+                'daily_dist_pct': daily_dist_pct,
+                'hourly_ema50': last_hourly['ema50'],
+                'hourly_rsi': last_hourly['rsi_50'],
+                'hourly_dist_pct': hourly_dist_pct,
                 'v_alpha': v_alpha,
                 'market_cap': market_cap,
                 'mkt_type': mkt_type,
@@ -225,8 +241,8 @@ def scan_market(pairs):
 
         time.sleep(0.01)
 
-    # سورت بر اساس RSI (بیشترین به کمترین)
-    results.sort(key=lambda x: x['rsi_daily'], reverse=True)
+    # مرتب‌سازی بر اساس RSI ساعتی (نزولی)
+    results.sort(key=lambda x: x['hourly_rsi'], reverse=True)
 
     return results
 
@@ -236,17 +252,17 @@ def build_card_messages(signals, total_scanned):
     now = datetime.now().strftime('%Y/%m/%d %H:%M:%S')
 
     header = (
-        f"🔍 <b>اسکنر XT | فیلتر قیمت > EMA50 و RSI(50) > 50</b>\n"
+        f"🔍 <b>اسکنر XT | فیلتر ترکیبی روزانه + ساعتی</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📊 نمادهای بررسی شده: <code>{total_scanned}</code>\n"
         f"✅ عبور کرده: <code>{len(signals)}</code>\n"
         f"📋 شرایط:\n"
-        f" ├─ ۱) قیمت بسته شدن > EMA50 (روزانه)\n"
-        f" └─ ۲) RSI(50) > 50 (روزانه)\n"
+        f" ├─ 📅 روزانه: Close > EMA50  و  RSI(50) > 50\n"
+        f" └─ 🕐 ساعتی: Close > EMA50  و  RSI(50) > 50\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
     )
 
-    footer = f"\n⏰ {now} 🇮🇷\n🤖 XT Scanner v4.0"
+    footer = f"\n⏰ {now} 🇮🇷\n🤖 XT Scanner v5.0"
 
     msgs = []
     body = ""
@@ -256,7 +272,7 @@ def build_card_messages(signals, total_scanned):
         tv_symbol = s['symbol'].replace('/', '')
         tv_link = f"https://www.tradingview.com/chart/?symbol=:{tv_symbol}"
 
-        # فرمت کردن مارکت کپ
+        # فرمت مارکت کپ
         if s['market_cap'] is not None:
             if s['market_cap'] >= 1e9:
                 mc_str = f"${s['market_cap']/1e9:.2f}B"
@@ -277,16 +293,19 @@ def build_card_messages(signals, total_scanned):
         else:
             vol_emoji = "📉"
             vol_text = f"{s['v_alpha']:.2f}x"
-        
-        # محاسبه فاصله قیمت از EMA50 (درصد)
-        price_vs_ema_pct = ((s['price'] - s['ema50']) / s['ema50']) * 100
-        
+
         card = (
             f"{r}. <a href='{tv_link}'>{escape(s['symbol'])}</a> [{s['mkt_type']}]\n"
             f"💰 Price: {s['price']:,.6f} USDT\n"
-            f"📊 EMA50: {s['ema50']:,.6f}\n"
-            f"📈 Price > EMA50: +{price_vs_ema_pct:.2f}%\n"
-            f"🎯 RSI(50): <b>{s['rsi_daily']:.2f}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📅 <b>Daily</b>\n"
+            f"   ├─ EMA50: {s['daily_ema50']:,.6f}\n"
+            f"   ├─ Close > EMA50: +{s['daily_dist_pct']:.2f}%\n"
+            f"   └─ RSI(50): {s['daily_rsi']:.2f}\n"
+            f"🕐 <b>Hourly</b>\n"
+            f"   ├─ EMA50: {s['hourly_ema50']:,.6f}\n"
+            f"   ├─ Close > EMA50: +{s['hourly_dist_pct']:.2f}%\n"
+            f"   └─ RSI(50): <b>{s['hourly_rsi']:.2f}</b>\n"
             f"{vol_emoji} Vol Ratio: <b>{vol_text}</b>\n"
             f"🏛️ Market Cap: {mc_str}\n"
             f"─────────────────────\n"
@@ -337,8 +356,7 @@ def send_telegram_message(text, chat_id=None):
 
 # ================= MAIN =================
 def run():
-    """تابع اصلی اجرا"""
-    print("🚀 شروع اسکنر XT با فیلترهای جدید (قیمت > EMA50 و RSI > 50)...")
+    print("🚀 شروع اسکنر XT با فیلترهای روزانه + ساعتی (قیمت > EMA50 و RSI > 50)...")
 
     pairs = get_filtered_pairs()
     print(f"📊 کل نمادهای فعال (بدون تکرار): {len(pairs)}")
@@ -347,22 +365,19 @@ def run():
 
     print(f"\n✅ اسکن پایان یافت: {len(results)} نماد پیدا شد")
 
-    # نمایش نتایج در کنسول
+    # نمایش در کنسول
     if results:
-        print("\n" + "=" * 60)
-        print("🎯 نمادهای پیدا شده (مرتب شده بر اساس RSI از بالا به پائین):")
-        print("=" * 60)
+        print("\n" + "=" * 70)
+        print("🎯 نمادهای پیدا شده (مرتب شده بر اساس RSI ساعتی نزولی):")
+        print("=" * 70)
         for i, r in enumerate(results, 1):
             mc_str = f"${r['market_cap']:,.0f}" if r['market_cap'] else "N/A"
-            price_vs_ema_pct = ((r['price'] - r['ema50']) / r['ema50']) * 100
             print(f"\n{i}. {r['symbol']} [{r['mkt_type']}]")
-            print(f"   Price: {r['price']:,.6f}")
-            print(f"   EMA50: {r['ema50']:,.6f}")
-            print(f"   Price > EMA50: +{price_vs_ema_pct:.2f}%")
-            print(f"   📊 RSI(50): {r['rsi_daily']:.2f}")
-            print(f"   📊 V_alpha: {r['v_alpha']:.2f}")
-            print(f"   🏛️ Market Cap: {mc_str}")
-        print("=" * 60)
+            print(f"   💰 Price: {r['price']:,.6f}")
+            print(f"   📅 Daily: Close>EMA50 +{r['daily_dist_pct']:.2f}% | RSI={r['daily_rsi']:.2f}")
+            print(f"   🕐 Hourly: Close>EMA50 +{r['hourly_dist_pct']:.2f}% | RSI={r['hourly_rsi']:.2f}")
+            print(f"   📊 V_alpha: {r['v_alpha']:.2f} | 🏛️ MCap: {mc_str}")
+        print("=" * 70)
 
     # ارسال به تلگرام
     if TELEGRAM_CHAT_IDS:
