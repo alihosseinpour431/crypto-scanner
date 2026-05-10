@@ -1,4 +1,4 @@
-# ✅ اسکنر XT با فیلتر نهایی مارکت کپ (۱M - ۲۰M دلار) + مرتب‌سازی صعودی
+# ✅ اسکنر XT - فیلترهای روزانه و ساعتی + RSI ساعتی بین 50 و 61 (بدون فیلتر مارکت کپ)
 
 import os 
 import time
@@ -23,10 +23,6 @@ HOURLY_LIMIT = 300
 
 # حداقل کندل مورد نیاز
 MIN_BARS_REQUIRED = 200
-
-# فیلتر مارکت کپ (دلار)
-MIN_MARKET_CAP = 1_000_000   # 1 میلیون دلار
-MAX_MARKET_CAP = 20_000_000  # 20 میلیون دلار
 
 # ================= ENV & SECURITY =================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -121,8 +117,7 @@ def scan_market(pairs):
 
     print(f"🔍 شروع اسکن {total} نماد...")
     print(f"   📅 فیلتر روزانه: Close > EMA50  و  RSI(50) > 50")
-    print(f"   🕐 فیلتر ساعتی: Close > EMA50  و  RSI(50) > 50")
-    print(f"   💰 فیلتر نهایی: مارکت کپ بین {MIN_MARKET_CAP:,} تا {MAX_MARKET_CAP:,} دلار")
+    print(f"   🕐 فیلتر ساعتی: Close > EMA50  و  50 < RSI(50) < 61")
     print("-" * 50)
 
     for idx, (symbol, info) in enumerate(tqdm(pairs, desc="Scanning", total=total), 1):
@@ -148,7 +143,10 @@ def scan_market(pairs):
             last_hourly = df_hourly.iloc[-1]
             if any(pd.isna(last_hourly[x]) for x in ['close', 'ema50', 'rsi_50']):
                 continue
-            if not (last_hourly['close'] > last_hourly['ema50'] and last_hourly['rsi_50'] > 50):
+            
+            # شرط ساعتی: Close > EMA50  و  RSI بین 50 و 61 (بازه باز)
+            hourly_rsi = last_hourly['rsi_50']
+            if not (last_hourly['close'] > last_hourly['ema50'] and 50 < hourly_rsi < 61):
                 continue
 
             # نسبت حجم ساعتی
@@ -156,12 +154,9 @@ def scan_market(pairs):
             avg_50h = df_hourly['volume'].iloc[-50:].mean()
             volume_ratio = avg_5h / avg_50h if avg_50h > 0 and not np.isnan(avg_50h) else 0
 
-            # مارکت کپ
+            # مارکت کپ (فقط برای نمایش، بدون فیلتر)
             symbol_base = symbol.split('/')[0]
             market_cap = get_market_cap_from_cmc(symbol_base)
-            
-            # فیلتر مارکت کپ (بعداً اعمال می‌شود اما برای کاهش دیتا اینجا هم می‌توان چک کرد)
-            # ولی فعلاً collect می‌کنیم تا بعداً فیلتر و سورت کنیم
 
             daily_dist_pct = ((last_daily['close'] - last_daily['ema50']) / last_daily['ema50']) * 100
             hourly_dist_pct = ((last_hourly['close'] - last_hourly['ema50']) / last_hourly['ema50']) * 100
@@ -174,7 +169,7 @@ def scan_market(pairs):
                 'daily_rsi': last_daily['rsi_50'],
                 'daily_dist_pct': daily_dist_pct,
                 'hourly_ema50': last_hourly['ema50'],
-                'hourly_rsi': last_hourly['rsi_50'],
+                'hourly_rsi': hourly_rsi,
                 'hourly_dist_pct': hourly_dist_pct,
                 'v_alpha': volume_ratio,
                 'market_cap': market_cap,
@@ -186,50 +181,46 @@ def scan_market(pairs):
                 print(f"⚠️ Error {symbol}: {e}")
         time.sleep(0.01)
 
-    # ========== اعمال فیلتر نهایی مارکت کپ ==========
-    filtered_results = []
-    for res in results:
-        mc = res['market_cap']
-        if mc is not None and MIN_MARKET_CAP <= mc <= MAX_MARKET_CAP:
-            filtered_results.append(res)
+    # مرتب‌سازی نزولی بر اساس RSI ساعتی (قوی‌ترین سیگنال اول)
+    results.sort(key=lambda x: x['hourly_rsi'], reverse=True)
 
-    # مرتب‌سازی صعودی بر اساس مارکت کپ (کوچک به بزرگ)
-    filtered_results.sort(key=lambda x: x['market_cap'])
-
-    return filtered_results
+    return results
 
 # ================= MESSAGE BUILDER =================
 def build_card_messages(signals, total_scanned):
     now = datetime.now().strftime('%Y/%m/%d %H:%M:%S')
     header = (
-        f"🔍 <b>اسکنر XT | فیلتر ترکیبی + مارکت کپ ۱M-۲۰M</b>\n"
+        f"🔍 <b>اسکنر XT | فیلتر روزانه + ساعتی (RSI ساعتی ۵۰-۶۱)</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📊 نمادهای بررسی شده: <code>{total_scanned}</code>\n"
-        f"✅ عبور کرده (و مارکت کپ ۱-۲۰M): <code>{len(signals)}</code>\n"
+        f"✅ عبور کرده: <code>{len(signals)}</code>\n"
         f"📋 شرایط:\n"
         f" ├─ 📅 روزانه: Close > EMA50  و  RSI(50) > 50\n"
-        f" ├─ 🕐 ساعتی: Close > EMA50  و  RSI(50) > 50\n"
-        f" └─ 💰 مارکت کپ: ۱M ≤ cap ≤ ۲۰M دلار (مرتب‌سازی صعودی)\n"
+        f" └─ 🕐 ساعتی: Close > EMA50  و  50 < RSI(50) < 61\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
     )
-    footer = f"\n⏰ {now} 🇮🇷\n🤖 XT Scanner v6.0"
+    footer = f"\n⏰ {now} 🇮🇷\n🤖 XT Scanner v7.0"
 
     msgs = []
     body = ""
     MAX = 4000
 
     for r, s in enumerate(signals, 1):
-        tv_symbol = s['symbol'].replace('/', '')
-        tv_link = f"https://www.tradingview.com/chart/?symbol=:{tv_symbol}"
+        # لینک صحیح تریدینگ ویو با پیشوند XT
+        tv_symbol = s['symbol'].replace('/', '')  # مثلاً BTCUSDT
+        tv_link = f"https://www.tradingview.com/chart/?symbol=XT:{tv_symbol}"
 
-        # فرمت مارکت کپ
+        # فرمت مارکت کپ (فقط نمایش)
         mc = s['market_cap']
-        if mc >= 1e9:
-            mc_str = f"${mc/1e9:.2f}B"
-        elif mc >= 1e6:
-            mc_str = f"${mc/1e6:.2f}M"
+        if mc is not None:
+            if mc >= 1e9:
+                mc_str = f"${mc/1e9:.2f}B"
+            elif mc >= 1e6:
+                mc_str = f"${mc/1e6:.2f}M"
+            else:
+                mc_str = f"${mc:,.0f}"
         else:
-            mc_str = f"${mc:,.0f}"
+            mc_str = "N/A"
 
         # ایموجی حجم
         if s['v_alpha'] > 1.5:
@@ -253,7 +244,7 @@ def build_card_messages(signals, total_scanned):
             f"🕐 <b>Hourly</b>\n"
             f"   ├─ EMA50: {s['hourly_ema50']:,.6f}\n"
             f"   ├─ Close > EMA50: +{s['hourly_dist_pct']:.2f}%\n"
-            f"   └─ RSI(50): <b>{s['hourly_rsi']:.2f}</b>\n"
+            f"   └─ RSI(50): <b>{s['hourly_rsi']:.2f}</b>  (بازه ۵۰-۶۱)\n"
             f"{vol_emoji} Vol Ratio: <b>{vol_text}</b>\n"
             f"🏛️ Market Cap: {mc_str}\n"
             f"─────────────────────\n"
@@ -268,7 +259,7 @@ def build_card_messages(signals, total_scanned):
     if body.strip():
         msgs.append(header + body + footer)
     if not msgs:
-        msgs.append(f"{header}❌ هیچ نمادی با مارکت کپ ۱-۲۰ میلیون دلار شرایط را نداشت.{footer}")
+        msgs.append(f"{header}❌ هیچ نمادی با شرایط RSI ساعتی بین ۵۰ و ۶۱ یافت نشد.{footer}")
 
     return msgs
 
@@ -298,27 +289,30 @@ def send_telegram_message(text, chat_id=None):
 
 # ================= MAIN =================
 def run():
-    print("🚀 شروع اسکنر XT با فیلترهای روزانه+ساعتی + مارکت کپ ۱-۲۰ میلیون دلار (مرتب‌سازی صعودی)...")
+    print("🚀 شروع اسکنر XT با فیلترهای روزانه+ساعتی (RSI ساعتی بین ۵۰ و ۶۱)...")
     pairs = get_filtered_pairs()
     print(f"📊 کل نمادهای فعال (بدون تکرار): {len(pairs)}")
     results = scan_market(pairs)
-    print(f"\n✅ اسکن پایان یافت: {len(results)} نماد با مارکت کپ مناسب پیدا شد")
+    print(f"\n✅ اسکن پایان یافت: {len(results)} نماد پیدا شد")
 
     # نمایش در کنسول
     if results:
         print("\n" + "=" * 70)
-        print("🎯 نمادهای پیدا شده (مرتب‌سازی صعودی بر اساس مارکت کپ - از کوچک به بزرگ):")
+        print("🎯 نمادهای پیدا شده (مرتب‌سازی بر اساس RSI ساعتی نزولی):")
         print("=" * 70)
         for i, r in enumerate(results, 1):
             mc = r['market_cap']
-            if mc >= 1e6:
-                mc_str = f"${mc/1e6:.2f}M"
+            if mc is not None:
+                if mc >= 1e6:
+                    mc_str = f"${mc/1e6:.2f}M"
+                else:
+                    mc_str = f"${mc:,.0f}"
             else:
-                mc_str = f"${mc:,.0f}"
+                mc_str = "N/A"
             print(f"\n{i}. {r['symbol']} [{r['mkt_type']}]")
             print(f"   💰 Price: {r['price']:,.6f}")
             print(f"   📅 Daily: Close>EMA50 +{r['daily_dist_pct']:.2f}% | RSI={r['daily_rsi']:.2f}")
-            print(f"   🕐 Hourly: Close>EMA50 +{r['hourly_dist_pct']:.2f}% | RSI={r['hourly_rsi']:.2f}")
+            print(f"   🕐 Hourly: Close>EMA50 +{r['hourly_dist_pct']:.2f}% | RSI={r['hourly_rsi']:.2f} (۵۰-۶۱)")
             print(f"   📊 Vol Ratio: {r['v_alpha']:.2f}x | 🏛️ Market Cap: {mc_str}")
         print("=" * 70)
 
