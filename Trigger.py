@@ -30,7 +30,7 @@ MIN_BARS_REQUIRED = 200
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_IDS = [cid.strip() for cid in os.getenv("TELEGRAM_CHAT_ID", "").split(",") if cid.strip()]
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
-CMC_API_KEY = os.getenv("CMC_PRO_API_KEY", "39478549b7c94ee093d0f3cbe43a39e9")
+CMC_API_KEY = os.getenv("CMC_PRO_API_KEY", "39478549b7c94ee093d0f3cbe43a39")
 
 if not TELEGRAM_BOT_TOKEN:
     print("⚠️ TELEGRAM_BOT_TOKEN is not set. Running in console-only mode.")
