@@ -1,8 +1,6 @@
-
-# ✅ اسکنر بازار کریپتو - صرافی XT با فیلترهای جدید
-# فیلتر ۱: روزانه - EMA30 > EMA50
-# فیلتر ۲: ساعتی - EMA30 > EMA50 > EMA200
-# فیلتر ۳: ریسک - (EMA50 - EMA200) / EMA200 * 100 => بین 0 تا 10 درصد (مثبت)
+# ✅ اسکنر بازار کریپتو - صرافی XT با فیلتر جدید
+# فیلتر ۱: روزانه - قیمت > EMA50
+# فیلتر ۲: روزانه - RSI(50) > 50
 
 import os 
 import time
@@ -22,22 +20,16 @@ SCAN_FUTURES = True
 # تایم‌فریم‌ها
 DAILY_TF = '1d'
 DAILY_LIMIT = 300
-HOURLY_TF = '1h'
-HOURLY_LIMIT = 300
 
 # حداقل کندل مورد نیاز
 MIN_BARS_REQUIRED = 200
-
-# تنظیمات ریسک
-MIN_RISK = 0.0
-MAX_RISK = 5.0
 
 # ================= ENV & SECURITY =================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_IDS = [cid.strip() for cid in os.getenv("TELEGRAM_CHAT_ID", "").split(",") if cid.strip()]
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
 CMC_API_KEY = os.getenv("CMC_PRO_API_KEY", "39478549b7c94ee093d0f3cbe43a39e9")
-# اگر توکن تلگرام تنظیم نشده باشد، فقط در کنسول نمایش می‌دهد
+
 if not TELEGRAM_BOT_TOKEN:
     print("⚠️ TELEGRAM_BOT_TOKEN is not set. Running in console-only mode.")
 
@@ -72,17 +64,14 @@ def get_filtered_pairs():
         is_spot = info.get('spot', False)
         is_future = info.get('future', False) or info.get('swap', False)
 
-        # بررسی اینکه آیا باید اسکن شود
         should_scan = (SCAN_SPOT and is_spot) or (SCAN_FUTURES and is_future)
 
         if should_scan:
             base = symbol.split('/')[0].upper()
 
-            # اگر قبلاً ثبت نشده، یا اگر اسپات است و قبلاً فیوچرز ثبت شده بود
             if base not in symbol_map:
                 symbol_map[base] = (symbol, info, is_spot)
             elif is_spot and not symbol_map[base][2]:
-                # ترجیح با اسپات است
                 symbol_map[base] = (symbol, info, True)
 
     return [(sym, inf) for sym, inf, _ in symbol_map.values()]
@@ -106,12 +95,10 @@ def fetch_ohlcv(symbol, timeframe, limit):
             print(f"⚠️ Fetch error {symbol}: {e}")
         return None
 
-
 # ================= RSI CALCULATOR =================
 def calculate_rsi(series, period=50):
     """
     محاسبه RSI با دوره دلخواه (پیش‌فرض: ۵۰)
-    فرمول استاندارد: RSI = 100 - (100 / (1 + RS))
     """
     delta = series.diff()
     gain = (delta.where(delta > 0, 0)).ewm(alpha=1/period, adjust=False).mean()
@@ -123,9 +110,7 @@ def calculate_rsi(series, period=50):
     return rsi
 
 # ================= COINMARKETCAP MARKET CAP =================
-
 def get_market_cap_from_cmc(symbol_base):
-
     try:
         if not CMC_API_KEY:
             return None
@@ -138,19 +123,16 @@ def get_market_cap_from_cmc(symbol_base):
       
         headers = {
             'X-CMC_PRO_API_KEY': CMC_API_KEY,
-            'Accepts': 'application/json'  # با s
+            'Accepts': 'application/json'
         }
 
         resp = requests.get(url, params=params, headers=headers, timeout=5)
-        resp.raise_for_status()  # ✅ بررسی خطاهای HTTP
+        resp.raise_for_status()
         
         data = resp.json()
         
-        # ✅ اصلاح ۳: بررسی ساختار پاسخ مثل کد کارآمد
         if "data" in data and symbol_base.upper() in data["data"]:
             coin_data = data["data"][symbol_base.upper()]
-            
-            # استخراج مارکت‌کپ از ساختار quote -> USD
             market_cap = coin_data.get("quote", {}).get("USD", {}).get("market_cap")
             
             if market_cap is not None and market_cap > 0:
@@ -158,181 +140,119 @@ def get_market_cap_from_cmc(symbol_base):
         
         return None
         
-    except requests.exceptions.HTTPError as e:
-        if DEBUG_MODE:
-            print(f"⚠️ CMC HTTP Error for {symbol_base}: {e}")
-            if e.response is not None:
-                print(f"   Status: {e.response.status_code} | Body: {e.response.text[:200]}")
-        return None
-    except KeyError as e:
-        if DEBUG_MODE:
-            print(f"⚠️ CMC KeyError for {symbol_base}: {e}")
-        return None
     except Exception as e:
         if DEBUG_MODE:
-            print(f"⚠️ CMC unexpected error for {symbol_base}: {e}")
+            print(f"⚠️ CMC error for {symbol_base}: {e}")
         return None
 
 # ================= SCAN FUNCTION =================
 def scan_market(pairs):
     """
-    اسکن بازار با سه فیلتر:
-    ۱. روزانه: EMA30 > EMA50
-    ۲. ساعتی: EMA30 > EMA50 > EMA200
-    ۳. ریسک: (EMA50 - EMA200) / EMA200 * 100 => بین 0 تا 10 درصد (مثبت)
+    اسکن بازار با فیلترهای جدید:
+    ۱. روزانه: قیمت > EMA50
+    ۲. روزانه: RSI(50) > 50
     """
     results = []
     total = len(pairs)
 
     print(f"🔍 شروع اسکن {total} نماد...")
-    print(f"   فیلتر ۱: EMA30 > EMA50 (روزانه)")
-    print(f"   فیلتر ۲: EMA30 > EMA50 > EMA200 (ساعتی)")
-    print(f"   فیلتر ۳: Risk% = (EMA50 - EMA200) / EMA200 * 100 => بین {MIN_RISK} تا {MAX_RISK} درصد (مثبت)")
+    print(f"   فیلتر ۱: قیمت > EMA50 (روزانه)")
+    print(f"   فیلتر ۲: RSI(50) > 50 (روزانه)")
     print("-" * 50)
 
     for idx, (symbol, info) in enumerate(tqdm(pairs, desc="Scanning", total=total), 1):
         try:
-            # ========== فیلتر ۱: روزانه ==========
+            # دریافت داده‌های روزانه
             df_daily = fetch_ohlcv(symbol, DAILY_TF, DAILY_LIMIT)
 
             if df_daily is None:
                 continue
 
-            # محاسبه EMA30 و EMA50 برای روزانه
-            df_daily['ema30'] = df_daily['close'].ewm(span=30, adjust=False).mean()
+            # محاسبه EMA50 برای روزانه
             df_daily['ema50'] = df_daily['close'].ewm(span=50, adjust=False).mean()
+            
+            # محاسبه RSI(50) برای روزانه
+            df_daily['rsi_50'] = calculate_rsi(df_daily['close'], period=50)
 
             last_daily = df_daily.iloc[-1]
 
             # بررسی مقادیر NaN
-            if pd.isna(last_daily['close']) or pd.isna(last_daily['ema30']) or pd.isna(last_daily['ema50']):
+            if pd.isna(last_daily['close']) or pd.isna(last_daily['ema50']) or pd.isna(last_daily['rsi_50']):
                 continue
 
-            # شرط ۱: EMA30 > EMA50 در روزانه
-            if not (last_daily['ema30'] > last_daily['ema50']):
+            # فیلتر ۱: قیمت > EMA50
+            if not (last_daily['close'] > last_daily['ema50']):
                 continue
 
-            # ========== فیلتر ۲: ساعتی ==========
-            df_hourly = fetch_ohlcv(symbol, HOURLY_TF, HOURLY_LIMIT)
-
-            if df_hourly is None:
+            # فیلتر ۲: RSI(50) > 50
+            if not (last_daily['rsi_50'] > 50):
                 continue
 
-            # محاسبه EMA30, EMA50, EMA200 برای ساعتی
-            df_hourly['ema30'] = df_hourly['close'].ewm(span=30, adjust=False).mean()
-            df_hourly['ema50'] = df_hourly['close'].ewm(span=50, adjust=False).mean()
-            df_hourly['ema200'] = df_hourly['close'].ewm(span=200, adjust=False).mean()
-
-            last_hourly = df_hourly.iloc[-1]
-
-            # بررسی مقادیر NaN
-            if pd.isna(last_hourly['close']) or pd.isna(last_hourly['ema30']) or \
-               pd.isna(last_hourly['ema50']) or pd.isna(last_hourly['ema200']):
-                continue
-
-            # شرط ۲: EMA30 > EMA50 > EMA200 در ساعتی
-            if not (last_hourly['ema30'] > last_hourly['ema50'] > last_hourly['ema200']):
-                continue
-
-            # ========== فیلتر ۳: محاسبه ریسک ==========
-            # Risk% = (EMA50 - EMA200) / EMA200 * 100
-            # فقط مقادیر مثبت (یعنی EMA50 > EMA200)
-            risk_pct = ((last_hourly['ema50'] - last_hourly['ema200']) / last_hourly['ema200']) * 100
-
-            # شرط ۳: ریسک بین 0 تا 10 درصد (مثبت)
-            if not (MIN_RISK <= risk_pct <= MAX_RISK):
-                continue
-            # ========== محاسبه RSI(50) برای روزانه ==========
-            df_daily['rsi_50'] = calculate_rsi(df_daily['close'], period=50)
-            rsi_daily = df_daily.iloc[-1]['rsi_50']
+            # محاسبه Volume Ratio (مقایسه میانگین‌ها)
+            avg_5d = df_daily['volume'].iloc[-5:].mean()
+            avg_50d = df_daily['volume'].iloc[-50:].mean()
             
-            # ========== محاسبه RSI(50) برای ساعتی ==========
-            df_hourly['rsi_50'] = calculate_rsi(df_hourly['close'], period=50)
-            rsi_hourly = df_hourly.iloc[-1]['rsi_50']
-            
-            # بررسی NaN بودن RSIها
-            if pd.isna(rsi_daily) or pd.isna(rsi_hourly):
-                continue
-         
-            # ========== محاسبه Volume Ratio (مقایسه میانگین‌ها) ==========
-            avg_5h = df_hourly['volume'].iloc[-5:].mean()   # میانگین حجم ۵ ساعت اخیر
-            avg_200h = df_hourly['volume'].iloc[-200:].mean() # میانگین حجم ۲۰۰ ساعت اخیر
-            
-            if avg_200h > 0 and not np.isnan(avg_200h):
-                volume_ratio = avg_5h / avg_200h          # نسبت: مثلاً 2.5 یعنی ۲.۵ برابر میانگین
-                volume_change_pct = (volume_ratio - 1) * 100  # درصد تغییر: مثلاً +150%
+            if avg_50d > 0 and not np.isnan(avg_50d):
+                volume_ratio = avg_5d / avg_50d
+                volume_change_pct = (volume_ratio - 1) * 100
             else:
                 volume_ratio = 0
                 volume_change_pct = 0
             
-            # ذخیره در دیکشنری (کلید v_alpha را نگه می‌داریم تا کدهای بعدی خراب نشوند)
-            # اما مقدار آن را همان ratio قرار می‌دهیم
-            v_alpha = volume_ratio 
+            v_alpha = volume_ratio
 
-            # ========== دریافت مارکت کپ ==========
+            # دریافت مارکت کپ
             symbol_base = symbol.split('/')[0]
-          
             market_cap = get_market_cap_from_cmc(symbol_base)
-            # اگر مارکت کپ پیدا نشد، محاسبه تقریبی
-            if market_cap is None:
-                # برای صرافی XT، اطلاعات circulating supply موجود نیست
-                # بنابراین از محاسبه تقریبی استفاده نمی‌کنیم و None می‌گذاریم
-                market_cap = None
 
-            # ✅ همه فیلترها پاس شدند
             mkt_type = 'F' if (info.get('future') or info.get('swap')) else 'S'
 
             results.append({
                 'symbol': symbol,
                 'symbol_base': symbol_base,
-                'price': last_hourly['close'],
-                'risk_pct': risk_pct,
+                'price': last_daily['close'],
+                'ema50': last_daily['ema50'],
+                'rsi_daily': last_daily['rsi_50'],
                 'v_alpha': v_alpha,
                 'market_cap': market_cap,
                 'mkt_type': mkt_type,
-                'info': info,
-                'rsi_daily': rsi_daily,      # RSI(50) روزانه
-                'rsi_hourly': rsi_hourly     # RSI(50) ساعتی
+                'info': info
             })
 
         except Exception as e:
             if DEBUG_MODE:
                 print(f"⚠️ Error {symbol}: {e}")
 
-        # تأخیر کوتاه برای رعایت rate limit
         time.sleep(0.01)
 
-       # سورت بر اساس RSI ساعتی (بیشترین به کمترین)
-    results.sort(key=lambda x: x['rsi_hourly'], reverse=True)
+    # سورت بر اساس RSI (بیشترین به کمترین)
+    results.sort(key=lambda x: x['rsi_daily'], reverse=True)
 
     return results
 
 # ================= MESSAGE BUILDER =================
-
-def build_card_messages(signals, total_scanned):  
+def build_card_messages(signals, total_scanned):
     """ساخت پیام تلگرام"""
     now = datetime.now().strftime('%Y/%m/%d %H:%M:%S')
 
     header = (
-        f"🔍 <b>اسکنر XT | فیلتر ترکیبی جدید</b>\n"
+        f"🔍 <b>اسکنر XT | فیلتر قیمت > EMA50 و RSI(50) > 50</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📊 نمادهای بررسی شده: <code>{total_scanned}</code>\n"
         f"✅ عبور کرده: <code>{len(signals)}</code>\n"
         f"📋 شرایط:\n"
-        f" ├─ ۱) EMA30 > EMA50 (روزانه)\n"
-        f" ├─ ۲) EMA30 > EMA50 > EMA200 (ساعتی)\n"
-        f" └─ ۳) Risk% = (EMA50 - EMA200) / EMA200 * 100 => 0-10% (مثبت)\n"
+        f" ├─ ۱) قیمت بسته شدن > EMA50 (روزانه)\n"
+        f" └─ ۲) RSI(50) > 50 (روزانه)\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
     )
 
-    footer = f"\n⏰ {now} 🇮🇷\n🤖 XT Scanner v3.0"
+    footer = f"\n⏰ {now} 🇮🇷\n🤖 XT Scanner v4.0"
 
     msgs = []
     body = ""
     MAX = 4000
 
     for r, s in enumerate(signals, 1):
-        # ساخت لینک TradingView
         tv_symbol = s['symbol'].replace('/', '')
         tv_link = f"https://www.tradingview.com/chart/?symbol=:{tv_symbol}"
 
@@ -347,11 +267,10 @@ def build_card_messages(signals, total_scanned):
         else:
             mc_str = "N/A"
 
-        
-        # اگر volume_ratio > 1.5 باشد (جهش حجم)، با ایموجی 🔥 نمایش بده
+        # ایموجی حجم
         if s['v_alpha'] > 1.5:
             vol_emoji = "🔥"
-            vol_text = f"{s['v_alpha']:.2f}x"  # نمایش به صورت ضریب
+            vol_text = f"{s['v_alpha']:.2f}x"
         elif s['v_alpha'] > 1.0:
             vol_emoji = "📈"
             vol_text = f"{s['v_alpha']:.2f}x"
@@ -359,18 +278,19 @@ def build_card_messages(signals, total_scanned):
             vol_emoji = "📉"
             vol_text = f"{s['v_alpha']:.2f}x"
         
+        # محاسبه فاصله قیمت از EMA50 (درصد)
+        price_vs_ema_pct = ((s['price'] - s['ema50']) / s['ema50']) * 100
+        
         card = (
             f"{r}. <a href='{tv_link}'>{escape(s['symbol'])}</a> [{s['mkt_type']}]\n"
             f"💰 Price: {s['price']:,.6f} USDT\n"
-            f"⚠️ Risk: {s['risk_pct']:.2f}%\n"
-            f"📊 RSI(50)_d: {s['rsi_daily']:5.2f}\n"
-            f"📊 RSI(50)_h: {s['rsi_hourly']:5.2f}\n"  
-            f"{vol_emoji} Vol Ratio: <b>{vol_text}</b>\n"  
+            f"📊 EMA50: {s['ema50']:,.6f}\n"
+            f"📈 Price > EMA50: +{price_vs_ema_pct:.2f}%\n"
+            f"🎯 RSI(50): <b>{s['rsi_daily']:.2f}</b>\n"
+            f"{vol_emoji} Vol Ratio: <b>{vol_text}</b>\n"
             f"🏛️ Market Cap: {mc_str}\n"
             f"─────────────────────\n"
         )
-        
-
 
         if len(header) + len(body) + len(card) + len(footer) > MAX - 100:
             msgs.append(header + body + footer)
@@ -385,7 +305,6 @@ def build_card_messages(signals, total_scanned):
         msgs.append(f"{header}❌ هیچ نمادی شرایط را نداشت.{footer}")
 
     return msgs
-
 
 # ================= TELEGRAM =================
 def send_telegram_message(text, chat_id=None):
@@ -406,11 +325,10 @@ def send_telegram_message(text, chat_id=None):
             'chat_id': cid,
             'text': text,
             'parse_mode': 'HTML',
-            'disable_web_page_preview': False  # فعال کردن لینک‌ها
+            'disable_web_page_preview': False
         }
 
         try:
-            import requests
             r = requests.post(url, json=payload, timeout=30)
             if DEBUG_MODE and r.status_code != 200:
                 print(f"⚠️ Telegram ({cid}): {r.status_code} | {r.text[:100]}")
@@ -420,13 +338,11 @@ def send_telegram_message(text, chat_id=None):
 # ================= MAIN =================
 def run():
     """تابع اصلی اجرا"""
-    print("🚀 شروع اسکنر XT با فیلترهای جدید...")
+    print("🚀 شروع اسکنر XT با فیلترهای جدید (قیمت > EMA50 و RSI > 50)...")
 
-    # دریافت لیست جفت‌ارزها
     pairs = get_filtered_pairs()
     print(f"📊 کل نمادهای فعال (بدون تکرار): {len(pairs)}")
 
-    # اسکن بازار
     results = scan_market(pairs)
 
     print(f"\n✅ اسکن پایان یافت: {len(results)} نماد پیدا شد")
@@ -434,32 +350,27 @@ def run():
     # نمایش نتایج در کنسول
     if results:
         print("\n" + "=" * 60)
-        print("🎯 نمادهای پیدا شده (مرتب شده بر اساس RSI ساعتی از بالا به پائین):")
+        print("🎯 نمادهای پیدا شده (مرتب شده بر اساس RSI از بالا به پائین):")
         print("=" * 60)
         for i, r in enumerate(results, 1):
             mc_str = f"${r['market_cap']:,.0f}" if r['market_cap'] else "N/A"
+            price_vs_ema_pct = ((r['price'] - r['ema50']) / r['ema50']) * 100
             print(f"\n{i}. {r['symbol']} [{r['mkt_type']}]")
             print(f"   Price: {r['price']:,.6f}")
-            print(f"   ⚠️ Risk: {r['risk_pct']:.2f}%")
-            print(f"   📊 RSI_D[{r['rsi_daily']:.2f}]")
-            print(f"   📊 RSI_H[{r['rsi_hourly']:.2f}]")  
+            print(f"   EMA50: {r['ema50']:,.6f}")
+            print(f"   Price > EMA50: +{price_vs_ema_pct:.2f}%")
+            print(f"   📊 RSI(50): {r['rsi_daily']:.2f}")
             print(f"   📊 V_alpha: {r['v_alpha']:.2f}")
             print(f"   🏛️ Market Cap: {mc_str}")
         print("=" * 60)
 
-    
-      # ========== ارسال به تلگرام ==========
+    # ارسال به تلگرام
     if TELEGRAM_CHAT_IDS:
         print("\n📤 ارسال نتایج به تلگرام...")
-        
-        # ۱️⃣ اول: ارسال کارت‌های کامل (همان کد قبلی)
-        card_msgs = build_card_messages(results, len(pairs))  # ✅ نام جدید تابع
+        card_msgs = build_card_messages(results, len(pairs))
         for msg in card_msgs:
             send_telegram_message(msg)
             time.sleep(0.3)
-        
-
-       
 
 # ================= RUN =================
 if __name__ == "__main__":
