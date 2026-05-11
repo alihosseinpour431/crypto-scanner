@@ -241,11 +241,8 @@ def scan_market(pairs):
     results.sort(key=lambda x: abs(x['Re']))
     return results
 
-# ================= MESSAGE BUILDER (Separated by Rect) =================
+# ================= MESSAGE BUILDER (بدون جدول) =================
 def build_messages_for_rect(signals, rect_type, total_scanned, min_risk, max_risk):
-    """
-    ساخت پیام‌ها برای یک نوع مستطیل خاص (مثبت یا منفی)
-    """
     filtered = [s for s in signals if s['rect'] == rect_type]
     if not filtered:
         return []
@@ -294,34 +291,23 @@ def build_messages_for_rect(signals, rect_type, total_scanned, min_risk, max_ris
         )
         cards_text += card
 
-    table_text = build_table_summary_for_rect(filtered, rect_type)
-
-    full_text = header + cards_text + "\n" + table_text + footer
+    full_text = header + cards_text + footer
 
     max_len = 4000
     messages = []
     if len(full_text) <= max_len:
         messages.append(full_text)
     else:
-        card_only = header + cards_text + footer
-        if len(card_only) <= max_len:
-            messages.append(card_only)
-            if table_text.strip():
-                messages.append(table_text + footer)
-        else:
-            current = header
-            for line in cards_text.splitlines(True):
-                if len(current) + len(line) + len(footer) + 50 > max_len:
-                    messages.append(current + footer)
-                    current = line
-                else:
-                    current += line
-            if current.strip():
+        current = header
+        for line in cards_text.splitlines(True):
+            if len(current) + len(line) + len(footer) + 50 > max_len:
                 messages.append(current + footer)
-            if table_text.strip():
-                messages.append(table_text + footer)
+                current = line
+            else:
+                current += line
+        if current.strip():
+            messages.append(current + footer)
     return messages
-
 
 # ================= TELEGRAM =================
 def send_telegram_message(text, chat_id=None):
@@ -369,7 +355,6 @@ def run():
 
     if TELEGRAM_CHAT_IDS:
         print("\n📤 ارسال نتایج به تلگرام...")
-        # ارسال جداگانه برای مستطیل مثبت و منفی با محدوده ریسک مربوطه
         rects = [
             ('🟢 POS', POS_MIN_RISK, POS_MAX_RISK),
             ('🔴 NEG', NEG_MIN_RISK, NEG_MAX_RISK)
