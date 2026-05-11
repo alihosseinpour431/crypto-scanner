@@ -45,7 +45,7 @@ NEG_MAX_RISK = 2.0    # حداکثر |Re| و |Rp| (قدر مطلق)
 
 # تنظیمات مارکت کپ (به دلار)
 MIN_MARKET_CAP = 1_000_000       # حداقل ۱ میلیون دلار
-MAX_MARKET_CAP = 80_000_000      # حداکثر ۸۰ میلیون دلار
+MAX_MARKET_CAP = 100_000_000_000      # حداکثر ۸۰ میلیون دلار
 
 # ================= ENV & SECURITY =================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
