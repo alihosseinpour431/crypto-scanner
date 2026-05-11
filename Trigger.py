@@ -4,7 +4,7 @@
 #   مستطیل مثبت: EMA50 > EMA200
 #   مستطیل منفی: EMA50 < EMA200
 # محاسبه Re = (EMA50 - EMA200) / EMA200 * 100
-# محاسبه Rp = (قیمت - EMA200) / EMA200 * 100
+# محاسبه Rp = (قیمت - EMA200) / EMA200 * 100 
 # فیلتر نهایی: |Re| و |Rp| طبق محدوده‌های مجزای مثبت/منفی
 # فیلتر مارکت کپ: بین MIN_MARKET_CAP و MAX_MARKET_CAP (پیش‌فرض ۱ تا ۸۰ میلیون دلار)
 # نمایش RSI روزانه و ساعتی + مارکت کپ + نسبت حجم (Volume Ratio) 
@@ -322,41 +322,6 @@ def build_messages_for_rect(signals, rect_type, total_scanned, min_risk, max_ris
                 messages.append(table_text + footer)
     return messages
 
-def build_table_summary_for_rect(signals_rect, rect_type):
-    if not signals_rect:
-        return ""
-    data = []
-    for s in signals_rect:
-        tv_symbol = s['symbol'].replace('/', '')
-        link = f"https://www.tradingview.com/chart/?symbol=:{tv_symbol}"
-        symbol_link = f"<a href='{link}'>{escape(s['symbol_base'])}</a>"
-        data.append({
-            'symbol': symbol_link,
-            'Re': s['Re'],
-            'Rp': s['Rp'],
-            'rsi_d': s['rsi_daily'],
-            'rsi_h': s['rsi_hourly'],
-            'vol': s['volume_ratio']
-        })
-
-    tbl_re = f"<b>📋 جدول {rect_type} بر اساس |Re| (صعودی)</b>\n"
-    tbl_re += "<code>Rank | Symbol   | Re%   | Rp%   | RSI(D/H) | Vol\n"
-    tbl_re += "-----+----------+-------+-------+----------+------\n"
-    for i, row in enumerate(data[:10], 1):
-        rsi_str = f"{row['rsi_d']:.0f}/{row['rsi_h']:.0f}"
-        tbl_re += f"{i:4} | {row['symbol']:<8} | {row['Re']:+5.2f} | {row['Rp']:+5.2f} | {rsi_str:8} | {row['vol']:.2f}x\n"
-    tbl_re += "</code>"
-
-    sorted_vol = sorted(data, key=lambda x: x['vol'], reverse=True)[:10]
-    tbl_vol = f"\n<b>🔥 جدول {rect_type} بر اساس حجم (نزولی)</b>\n"
-    tbl_vol += "<code>Rank | Symbol   | Re%   | Rp%   | RSI(D/H) | Vol\n"
-    tbl_vol += "-----+----------+-------+-------+----------+------\n"
-    for i, row in enumerate(sorted_vol, 1):
-        mark = "🔥" if row['vol'] > 2.0 else ""
-        rsi_str = f"{row['rsi_d']:.0f}/{row['rsi_h']:.0f}"
-        tbl_vol += f"{i:4} | {row['symbol']:<8} | {row['Re']:+5.2f} | {row['Rp']:+5.2f} | {rsi_str:8} | {row['vol']:.2f}x{mark}\n"
-    tbl_vol += "</code>"
-    return tbl_re + tbl_vol
 
 # ================= TELEGRAM =================
 def send_telegram_message(text, chat_id=None):
