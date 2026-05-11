@@ -284,8 +284,10 @@ def build_messages_for_rect(signals, rect_type, total_scanned, min_risk, max_ris
         card = (
             f"{r}. <a href='{tv_link}'>{escape(s['symbol'])}</a> [{s['mkt_type']}] {s['rect']}\n"
             f"💰 Price: {s['price']:,.6f} USDT\n"
-            f"📐 Re: {s['Re']:+.2f}% | Rp: {s['Rp']:+.2f}%\n"
-            f"📊 RSI: D {s['rsi_daily']:.1f} | H {s['rsi_hourly']:.1f}\n"
+            f"📐 Re: {s['Re']:+.2f}% \n"
+            f"📐 Rp: {s['Rp']:+.2f}%\n"
+            f"📊 RSI:D {s['rsi_daily']:.1f} \n"
+            f"📊 RSI:H {s['rsi_hourly']:.1f}\n"
             f"{vol_emoji} Vol Ratio: <b>{vol_text}</b>\n"
             f"🏛️ Market Cap: {mc_str}\n"
             f"─────────────────────\n"
